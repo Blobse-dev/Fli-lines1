@@ -27,8 +27,24 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import { City, PROBLEM_LABEL, SERVICE_INFO, dragCells, idx, isService, isZone } from '../../engine'
-import type { BuildTool, CityEvent, Problem, Review, Stats, Tile, Tool } from '../../engine'
+import {
+  City,
+  PROBLEM_LABEL,
+  ROAD_CAP,
+  SERVICE_INFO,
+  dragCells,
+  idx,
+  isPowerKind,
+  isService,
+  isZone,
+  type BuildTool,
+  type CityEvent,
+  type Problem,
+  type Review,
+  type Stats,
+  type Tile,
+  type Tool,
+} from '../../engine'
 import { GROUPS, ITEM, ITEMS } from '../../catalog'
 import type { Group, ItemId } from '../../catalog'
 import { MAP_CENTER, drawPreview, render, screenToTile } from '../../render'
@@ -140,12 +156,17 @@ function Game() {
     const cam = camRef.current
     let w = 0
     let h = 0
-    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    let dpr = Math.min(2, window.devicePixelRatio || 1)
     const resize = () => {
-      w = canvas.clientWidth
-      h = canvas.clientHeight
-      canvas.width = w * dpr
-      canvas.height = h * dpr
+      const nextWidth = canvas.clientWidth
+      const nextHeight = canvas.clientHeight
+      const nextDpr = Math.min(2, window.devicePixelRatio || 1)
+      if (nextWidth === w && nextHeight === h && nextDpr === dpr) return
+      w = nextWidth
+      h = nextHeight
+      dpr = nextDpr
+      canvas.width = Math.round(w * dpr)
+      canvas.height = Math.round(h * dpr)
     }
     resize()
     cam.x = w / 2 - MAP_CENTER[0] * cam.z
@@ -219,6 +240,14 @@ function Game() {
       }
       start = null
       if (pointers.size === 0) panFrom = null
+      else if (pointers.size === 1) panFrom = [...pointers.values()][0]
+      pinch = 0
+    }
+    const cancel = (e: PointerEvent) => {
+      pointers.delete(e.pointerId)
+      start = null
+      hover = tileAt(e.clientX, e.clientY)
+      panFrom = pointers.size === 1 ? [...pointers.values()][0] : null
       pinch = 0
     }
     const wheel = (e: WheelEvent) => {
@@ -230,7 +259,16 @@ function Game() {
     const held = new Set<string>()
     let mouse: [number, number] | null = null
     const keys = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return
+      if (
+        e.defaultPrevented ||
+        e.altKey ||
+        e.ctrlKey ||
+        e.metaKey ||
+        (e.target instanceof Element &&
+          (e.target instanceof HTMLElement && e.target.isContentEditable ||
+            e.target.closest('input, textarea, select, button, a, [contenteditable="true"], [role="slider"]') !== null))
+      ) return
+      if (e.repeat) return
       const k = e.key.toLowerCase()
       if (['w', 'a', 's', 'd', 'r', 'f', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'shift'].includes(k)) {
         held.add(k)
@@ -285,7 +323,7 @@ function Game() {
     canvas.addEventListener('pointerdown', down)
     canvas.addEventListener('pointermove', move)
     canvas.addEventListener('pointerup', up)
-    canvas.addEventListener('pointercancel', up)
+    canvas.addEventListener('pointercancel', cancel)
     canvas.addEventListener('wheel', wheel, { passive: false })
     canvas.addEventListener('contextmenu', noMenu)
     window.addEventListener('keydown', keys)
@@ -299,6 +337,7 @@ function Game() {
     let statAcc = 0
     let seen = 0
     const frame = (now: number) => {
+      resize()
       const dt = Math.min(0.1, (now - last) / 1000)
       last = now
       moveCamera(dt)
@@ -354,7 +393,7 @@ function Game() {
       canvas.removeEventListener('pointerdown', down)
       canvas.removeEventListener('pointermove', move)
       canvas.removeEventListener('pointerup', up)
-      canvas.removeEventListener('pointercancel', up)
+      canvas.removeEventListener('pointercancel', cancel)
       canvas.removeEventListener('wheel', wheel)
       canvas.removeEventListener('contextmenu', noMenu)
     }
@@ -389,6 +428,7 @@ function Game() {
     toolRef.current = 'inspect'
     setTool('inspect')
     selRef.current = at
+    setGroup(null)
   }
   const setTax = (v: number) => cityRef.current?.setTax(v)
   const [hoverItem, setHoverItem] = useState<ItemId | null>(null)
@@ -398,14 +438,15 @@ function Game() {
   const min = stats ? Math.floor((stats.time % 1) * 60) : 0
   const bar = (v: number) => `${Math.round(Math.max(0, v) * 100)}%`
 
+  const cityTitle = stats?.title ?? 'Empty land'
+
   return (
     <main className="relative h-[100svh] overflow-hidden bg-[#120d08] font-mono text-[#f4e9d8] select-none">
       <h1 className="sr-only">Miniature City, an isometric city builder</h1>
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full touch-none" aria-label="City map" />
 
-      {/* Top bar */}
       <div className="game-topbar absolute top-3 right-3 left-3 flex flex-wrap items-center gap-x-5 gap-y-1 rounded-xl bg-black/60 px-4 py-2 text-xs backdrop-blur max-sm:top-1 max-sm:right-1 max-sm:left-1 max-sm:gap-x-2 max-sm:gap-y-0.5 max-sm:rounded-lg max-sm:px-2 max-sm:py-1 max-sm:text-[10px]">
-        <span className="font-display text-base text-amber-200 max-sm:text-sm">{stats?.title ?? 'Empty land'}</span>
+        <span className="font-display text-base text-amber-200 max-sm:text-sm">{cityTitle}</span>
         <span className={stats && stats.money < 0 ? 'text-red-400' : ''}>${stats?.money.toLocaleString() ?? '—'}</span>
         <span className={`max-sm:hidden ${stats && stats.income < 0 ? 'text-red-400' : 'text-emerald-300'}`}>
           {stats && stats.income >= 0 ? '+' : ''}
@@ -607,7 +648,9 @@ function Meter({ label, cap, use }: { label: string; cap: number; use: number })
 
 function InspectPanel({ info, onClose }: { info: Inspect; onClose: () => void }) {
   const t = info.tile
-  const name = t.water
+  const name = t.kind === 'highway'
+    ? 'Highway'
+    : t.water
     ? t.kind === 'road'
       ? 'Bridge'
       : 'River'
@@ -625,13 +668,11 @@ function InspectPanel({ info, onClose }: { info: Inspect; onClose: () => void })
               ? `Industrial, level ${t.lvl}`
               : t.kind === 'park'
                 ? 'Park'
-                : t.kind === 'highway'
-                  ? 'Highway'
-                  : 'Road'
+                : 'Road'
   const rows: [string, string][] = []
   if (isZone(t.kind) || isService(t.kind)) {
     rows.push(['Road access', t.access ? 'Yes' : 'No — connect a road'])
-    rows.push(['Electricity', t.power || t.kind === 'power' ? 'Yes' : 'No'])
+    rows.push(['Electricity', t.power || isPowerKind(t.kind) ? 'Yes' : 'No'])
     rows.push(['Water', t.waterOk || t.kind === 'pump' ? 'Yes' : 'No'])
   }
   if (isZone(t.kind)) {
@@ -640,7 +681,10 @@ function InspectPanel({ info, onClose }: { info: Inspect; onClose: () => void })
     rows.push(['Crime', `${Math.round(t.crime * 100)}%`])
     rows.push(['Fire / police / clinic', `${t.fireCov ? '✓' : '✗'} ${t.policeCov ? '✓' : '✗'} ${t.healthCov ? '✓' : '✗'}`])
   }
-  if (t.kind === 'road') rows.push(['Traffic', t.traffic > 3.2 ? 'Jammed' : t.traffic > 1.5 ? 'Busy' : 'Light'])
+  if (t.kind === 'road') {
+    const capacity = ROAD_CAP[t.road]
+    rows.push(['Traffic', t.traffic > 3.2 * capacity ? 'Jammed' : t.traffic > 1.5 * capacity ? 'Busy' : 'Light'])
+  }
   return (
   <div className="absolute top-16 right-3 w-64 rounded-xl bg-black/70 p-4 text-xs backdrop-blur max-sm:top-14 max-sm:right-1 max-sm:w-52 max-sm:p-2 max-sm:text-[10px]">
       <div className="mb-2 flex items-start justify-between gap-2">

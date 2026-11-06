@@ -466,7 +466,7 @@ export class City {
     }
     if (tool === 'bulldoze') {
       if (t.kind === 'highway') return 'The highway can’t be removed'
-      if (t.kind === 'none' && t.trees === 0) return 'Nothing to clear'
+      if (t.kind === 'none' && t.trees === 0 && !t.pipe) return 'Nothing to clear'
       return null
     }
     if (t.water) return 'Can’t build on water'
@@ -524,6 +524,8 @@ export class City {
       if (tool === 'bulldoze') {
         t.kind = 'none'
         t.trees = 0
+        t.pipe = false
+        t.pipeOn = false
       } else if (item.kind === 'road') {
         t.kind = 'road'
         t.road = item.road ?? 'street'
@@ -712,6 +714,7 @@ export class City {
         }
       }
       for (const i of q) {
+        if (T[i].kind === 'pump') continue
         const x = i % N
         const y = (i / N) | 0
         for (let dy = -2; dy <= 2; dy++)
@@ -738,7 +741,7 @@ export class City {
       want.sort((a, b) => a[0] - b[0])
       let used = 0
       for (const [, i, load] of want) {
-        if (used + load > cap) break
+        if (used + load > cap) continue
         used += load
         set(T[i])
       }
@@ -1403,16 +1406,26 @@ export function dragCells(tool: Tool, a: [number, number], b: [number, number]):
     const [ax, ay] = a
     const [bx, by] = b
     const horizFirst = Math.abs(bx - ax) >= Math.abs(by - ay)
-    const sx = Math.sign(bx - ax) || 1
-    const sy = Math.sign(by - ay) || 1
-    if (horizFirst) {
-      for (let x = ax; x !== bx + sx; x += sx) out.push([x, ay])
-      for (let y = ay + sy; y !== by + sy; y += sy) out.push([bx, y])
-    } else {
-      for (let y = ay; y !== by + sy; y += sy) out.push([ax, y])
-      for (let x = ax + sx; x !== bx + sx; x += sx) out.push([x, by])
+    const sx = Math.sign(bx - ax)
+    const sy = Math.sign(by - ay)
+    const appendLine = (fixedAxis: 'x' | 'y', fixed: number, from: number, to: number) => {
+      if (fixed < 0 || fixed >= N) return
+      const low = Math.max(0, Math.min(from, to))
+      const high = Math.min(N - 1, Math.max(from, to))
+      if (low > high) return
+      const step = to < from ? -1 : 1
+      for (let value = step > 0 ? low : high; step > 0 ? value <= high : value >= low; value += step) {
+        out.push(fixedAxis === 'x' ? [fixed, value] : [value, fixed])
+      }
     }
-    return out.filter(([x, y]) => inside(x, y))
+    if (horizFirst) {
+      appendLine('y', ay, ax, bx)
+      if (by !== ay) appendLine('x', bx, ay + sy, by)
+    } else {
+      appendLine('x', ax, ay, by)
+      if (bx !== ax) appendLine('y', by, ax + sx, bx)
+    }
+    return out
   }
   const x0 = Math.max(0, Math.min(a[0], b[0]))
   const x1 = Math.min(N - 1, Math.max(a[0], b[0]))
