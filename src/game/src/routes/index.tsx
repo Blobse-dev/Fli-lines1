@@ -50,7 +50,7 @@ import type { Group, ItemId } from '../../catalog'
 import { MAP_CENTER, drawPreview, render, screenToTile } from '../../render'
 import type { Camera, View } from '../../render'
 
-export const Route = createFileRoute('/')({ 
+export const Route = createFileRoute('/')({
     component: Game,
 })
 
