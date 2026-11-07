@@ -901,13 +901,18 @@ function Game() {
       {info && <InspectPanel info={info} onClose={() => (selRef.current = null, setInfo(null))} />}
 
       {/* Views */}
-      <div className="absolute right-3 bottom-40 flex flex-col gap-1 rounded-xl bg-black/60 p-2 text-xs backdrop-blur max-sm:hidden">
+      <div
+        role="group"
+        aria-label="Map information overlays"
+        className="absolute right-3 bottom-40 flex flex-col gap-1 rounded-xl bg-black/60 p-2 text-xs backdrop-blur max-sm:right-1 max-sm:bottom-[calc(34svh+0.5rem)] max-sm:left-1 max-sm:flex-row max-sm:overflow-x-auto max-sm:rounded-lg max-sm:p-1"
+      >
         {VIEWS.map(([v, label]) => (
           <button
             key={v}
             type="button"
             onClick={() => pickView(v)}
-            className={`rounded-md px-3 py-1 text-left transition motion-reduce:transition-none ${view === v ? 'bg-amber-200 text-[#120d08]' : 'hover:bg-white/10'}`}
+            aria-pressed={view === v}
+            className={`shrink-0 rounded-md px-3 py-1 text-left transition motion-reduce:transition-none max-sm:px-2 max-sm:py-1.5 ${view === v ? 'bg-amber-200 text-[#120d08]' : 'hover:bg-white/10'}`}
           >
             {label}
           </button>
