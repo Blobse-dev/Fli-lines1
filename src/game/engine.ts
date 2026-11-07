@@ -269,7 +269,7 @@ export class City {
   reviews: Review[] = []
   private reviewAcc = 0
   riverX: number[] = []
-  money = 60000
+  money = 70000
   time = 15.5 // start mid-afternoon so golden hour arrives soon
   day = 1
   pop = 0
