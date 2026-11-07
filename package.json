@@ -20,7 +20,7 @@
   "bugs": {
     "url": "https://github.com/Blobse-dev/Fli-lines1/issues"
   },
-  "homepage": "https://github.com/Blobse-dev/Fli-lines1#readme",
+  "homepage": "https://blobse-dev.github.io/Fli-lines1/",
   "dependencies": {
     "@tanstack/react-router": "^1.170.46",
     "lucide-react": "^1.68.0",

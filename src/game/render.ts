@@ -1,6 +1,6 @@
 // Canvas renderer for the miniature city. Isometric 2:1 projection.
-import { City, DIRS, HW_COL, HW_ROW, N, idx, isService, isZone } from './engine'
-import type { Car, Problem, Tile, Tool } from './engine'
+import { City, DIRS, HW_COL, HW_ROW, N, idx, inside, isService, isZone } from './engine'
+import type { Car, OverheadLineType, Problem, Tile, Tool } from './engine'
 import { ITEM } from './catalog'
 import type { ItemId } from './catalog'
 
@@ -51,9 +51,29 @@ const ZONE: Record<string, RGB> = { res: hex('#7fd17a'), com: hex('#5aa9e6'), in
 const HOUSE_WALL = ['#efe6d4', '#e7d8bf', '#d9cdb6', '#f2eee6', '#cfd6d8'].map(hex)
 const ROOF = ['#9b4a33', '#5b5f66', '#7a3f2c', '#3f4449', '#8e6a4a'].map(hex)
 const BRICK = ['#a45a43', '#b9876a', '#8d5a46', '#c9b49a'].map(hex)
-const GLASS = ['#3b6f8f', '#2c5873', '#4a7d96', '#2f4e63', '#55808f'].map(hex)
+const GLASS = [
+  '#3b6f8f',
+  '#2c5873',
+  '#4a7d96',
+  '#2f4e63',
+  '#55808f',
+  '#467b87',
+  '#365e79',
+  '#638a96',
+  '#31546a',
+  '#507384',
+].map(hex)
 const CONCRETE = ['#d6d2c8', '#c4c0b6', '#e2ddd2'].map(hex)
 const IND = ['#9aa0a6', '#b5aa94', '#8c949c'].map(hex)
+const ZONE_FACADE_STYLES: Record<'res' | 'com' | 'ind', RGB[]> = {
+  res: ['#efe6d4', '#e7d8bf', '#d9cdb6', '#f2eee6', '#cfd6d8', '#e3c9a8', '#d4d8c6', '#e7d9d4', '#c6d3d5', '#e9dfc9'].map(hex),
+  com: ['#c5b9a5', '#aeb8b8', '#d2c7b7', '#9eafb5', '#c6b3a1', '#aeb9a7', '#d4d0c4', '#9dabb8', '#c6c1b4', '#b7a99a'].map(hex),
+  ind: ['#9aa0a6', '#b5aa94', '#8c949c', '#a6a18f', '#788b91', '#b1a08b', '#858d83', '#a6abb0', '#9c886f', '#79858b'].map(hex),
+}
+const RES_ROOF_STYLES = ['#9b4a33', '#5b5f66', '#7a3f2c', '#3f4449', '#8e6a4a', '#6e4b46', '#454c5a', '#a35f3d', '#596b55', '#705b42'].map(hex)
+const MANSION_TEXTURE_SIZE = 256
+const mansionTextures: (HTMLCanvasElement | null)[] = Array(10).fill(null)
+const mansionPatterns = new WeakMap<CanvasRenderingContext2D, (CanvasPattern | null)[]>()
 const SOOT = hex('#3a3430')
 const TREE = ['#3f6b2f', '#4b7a33', '#35602b', '#567f3a'].map(hex)
 
@@ -150,6 +170,7 @@ interface Ctx {
   t: number
   noLights: boolean // abandoned or burnt buildings have dark windows
   grime: number // 0..1 desaturation towards soot grey
+  classicZoneArt?: boolean
 }
 
 // ---------- Primitives ----------
@@ -296,15 +317,16 @@ function tree(c: Ctx, gx: number, gy: number, s: number, scale = 1) {
   const [x, y] = P(gx, gy)
   const r = (4.5 + s * 2.5) * scale
   const hgt = (7 + s * 5) * scale
+  const wind = Math.sin(c.t * 1.25 + gx * 0.73 + gy * 0.49) * 1.1 * scale
   ctx.fillStyle = '#4a3a2a'
   ctx.fillRect(x - 0.8, y - hgt * 0.6, 1.6, hgt * 0.6)
   const col = pick(TREE, s)
   ctx.beginPath()
-  ctx.arc(x, y - hgt, r, 0, Math.PI * 2)
+  ctx.arc(x + wind, y - hgt, r, 0, Math.PI * 2)
   ctx.fillStyle = rgb(col, 0.9)
   ctx.fill()
   ctx.beginPath()
-  ctx.arc(x + (c.L.sx > 0 ? r * 0.3 : -r * 0.3), y - hgt - r * 0.3, r * 0.6, 0, Math.PI * 2)
+  ctx.arc(x + (c.L.sx > 0 ? r * 0.3 : -r * 0.3) + wind * 1.25, y - hgt - r * 0.3, r * 0.6, 0, Math.PI * 2)
   ctx.fillStyle = rgb(col, 1.25, 0.8)
   ctx.fill()
 }
@@ -317,6 +339,101 @@ function treeShadow(c: Ctx, gx: number, gy: number, s: number, scale = 1) {
   c.ctx.beginPath()
   c.ctx.ellipse(x + c.shadow[0] * hgt, y + c.shadow[1] * hgt, r * 1.1, r * 0.55, 0, 0, Math.PI * 2)
   c.ctx.fill()
+}
+
+function groundTexture(c: Ctx, x: number, y: number, seed: number, col: RGB, count: number) {
+  if (!c.detail) return
+  const { ctx } = c
+  const tileSeed = seed + x * 17.31 + y * 41.73
+  const corners = [P(x, y), P(x + 1, y), P(x + 1, y + 1), P(x, y + 1)]
+  path(ctx, corners)
+  ctx.save()
+  ctx.clip()
+  ctx.fillStyle = rgb(col, 1, 0.18)
+  for (let mark = 0; mark < count; mark++) {
+    const u = 0.12 + hash(tileSeed, mark, 31) * 0.76
+    const v = 0.12 + hash(tileSeed, mark, 32) * 0.76
+    const [px, py] = P(x + u, y + v)
+    const size = 0.35 + hash(tileSeed, mark, 33) * 0.55
+    ctx.beginPath()
+    ctx.ellipse(px, py, size, size * 0.52, 0, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  ctx.restore()
+}
+
+function roadTexture(c: Ctx, x: number, y: number, seed: number) {
+  if (!c.detail) return
+  const { ctx } = c
+  const tileSeed = seed + x * 17.31 + y * 41.73
+  ctx.strokeStyle = 'rgba(225,220,205,0.12)'
+  ctx.lineWidth = 0.65
+  ctx.beginPath()
+  for (let mark = 0; mark < 4; mark++) {
+    const u = 0.18 + hash(tileSeed, mark, 41) * 0.64
+    const v = 0.18 + hash(tileSeed, mark, 42) * 0.64
+    const length = 0.035 + hash(tileSeed, mark, 43) * 0.045
+    const a = P(x + u, y + v)
+    const b = P(x + u + length, y + v + length * 0.25)
+    ctx.moveTo(a[0], a[1])
+    ctx.lineTo(b[0], b[1])
+  }
+  ctx.stroke()
+}
+
+function facadeTexture(c: Ctx, m: Shape, seed: number) {
+  if (!c.detail) return
+  const { ctx } = c
+  const A = P(m.x0, m.y1)
+  const B = P(m.x1, m.y1)
+  const C = P(m.x1, m.y0)
+  for (const [start, end, side] of [[A, B, 0], [B, C, 1]] as const) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.moveTo(start[0], start[1])
+    ctx.lineTo(end[0], end[1])
+    ctx.lineTo(end[0], end[1] - m.h)
+    ctx.lineTo(start[0], start[1] - m.h)
+    ctx.closePath()
+    ctx.clip()
+    ctx.beginPath()
+    for (let mark = 0; mark < 24; mark++) {
+      const u = 0.035 + hash(seed, mark, side + 51) * 0.93
+      const v = 0.1 + hash(seed, mark, side + 53) * 0.82
+      const sx = start[0] + (end[0] - start[0]) * u
+      const sy = start[1] + (end[1] - start[1]) * u - m.h * v
+      const length = 0.7 + hash(seed, mark, side + 55) * 1.8
+      ctx.moveTo(sx, sy)
+      ctx.lineTo(sx + length, sy - 0.35)
+    }
+    ctx.strokeStyle = 'rgba(48,40,32,0.13)'
+    ctx.lineWidth = 0.55
+    ctx.stroke()
+    ctx.restore()
+  }
+}
+
+function waterRipples(c: Ctx, x: number, y: number) {
+  if (!c.detail) return
+  const { ctx } = c
+  const corners = [P(x, y), P(x + 1, y), P(x + 1, y + 1), P(x, y + 1)]
+  path(ctx, corners)
+  ctx.save()
+  ctx.clip()
+  const [cx, cy] = P(x + 0.5, y + 0.5)
+  const phase = c.t * 0.7 + x * 1.71 + y * 2.37
+  for (let ripple = 0; ripple < 2; ripple++) {
+    const drift = ((phase + ripple * 0.8) % 1.6) / 1.6
+    const rx = 5 + ripple * 3.5
+    const ry = 1.3 + ripple * 0.55
+    const cyOffset = (drift - 0.5) * 7
+    ctx.beginPath()
+    ctx.ellipse(cx + (ripple ? 7 : -6) * (drift - 0.5), cy + cyOffset, rx, ry, -0.08, Math.PI * 1.08, Math.PI * 1.92)
+    ctx.strokeStyle = 'rgba(116,166,174,0.12)'
+    ctx.lineWidth = 0.8
+    ctx.stroke()
+  }
+  ctx.restore()
 }
 
 const TREE_SPOTS: [number, number][] = [
@@ -339,8 +456,19 @@ interface Shape {
 function shapes(t: Tile, x: number, y: number): Shape[] {
   const s = t.seed
   const g = t.grow < 1 ? 0.15 + 0.85 * (1 - (1 - t.grow) ** 2) : 1
-  const b = (i: number, h: number): Shape => ({ x0: x + i, y0: y + i, x1: x + 1 - i, y1: y + 1 - i, h: h * g })
+  const lotW = t.lotW > 0 ? t.lotW : 1
+  const lotH = t.lotH > 0 ? t.lotH : 1
+  const scaleHeight = 1 + Math.min(0.35, (lotW * lotH - 1) * 0.012)
+  const b = (i: number, h: number): Shape => ({
+    x0: x + i,
+    y0: y + i,
+    x1: x + lotW - i,
+    y1: y + lotH - i,
+    h: h * g * scaleHeight,
+  })
   if (t.kind === 'res') {
+    if (lotW * lotH >= 4) return [b(0.16, (s < 0.5 ? 2 : 3) * 10.5 + s * 2 + (t.lvl - 1) * 3)]
+    if (t.dens === 'low') return [b(0.22, 11 + s * 3)]
     if (t.lvl === 1) return [b(0.22, 11 + s * 3)]
     if (t.lvl === 2) return [b(0.14, 20 + s * 6)]
     if (t.lvl === 3) return [b(0.12, 38 + s * 12)]
@@ -365,6 +493,8 @@ function shapes(t: Tile, x: number, y: number): Shape[] {
     y1: y + y1,
     h: h * g,
   })
+  if (t.kind === 'pylon') return [r(0.3, 0.3, 0.7, 0.7, 2)]
+  if (t.kind === 'substation') return [r(0.08, 0.1, 0.92, 0.9, 8), r(0.12, 0.14, 0.38, 0.48, 12)]
   if (t.kind === 'solar') return [r(0.1, 0.1, 0.9, 0.9, 3)]
   if (t.kind === 'wind') return [r(0.42, 0.42, 0.58, 0.58, 70)]
   if (t.kind === 'school') return [r(0.08, 0.08, 0.6, 0.92, 20)]
@@ -427,7 +557,81 @@ function service(c: Ctx, t: Tile, x: number, y: number) {
   const sh = shapes(t, x, y)
   const busy = t.grow < 1
   const { ctx } = c
-  if (t.kind === 'power') {
+  if (t.kind === 'pylon') {
+    const [cx, cy] = P(x + 0.5, y + 0.5)
+    const h = 62 * Math.min(1, t.grow * 1.2)
+    const top = cy - h
+    ctx.strokeStyle = busy ? '#969b9e' : '#c4c9ca'
+    ctx.lineWidth = 1.7
+    ctx.beginPath()
+    ctx.moveTo(cx - 8, cy - 1)
+    ctx.lineTo(cx - 2, top)
+    ctx.lineTo(cx + 2, top)
+    ctx.lineTo(cx + 8, cy - 1)
+    ctx.moveTo(cx - 6, cy - 1)
+    ctx.lineTo(cx + 6, cy - 1)
+    ctx.moveTo(cx - 5, cy - h * 0.35)
+    ctx.lineTo(cx + 5, cy - h * 0.35)
+    ctx.moveTo(cx - 4, cy - h * 0.58)
+    ctx.lineTo(cx + 4, cy - h * 0.58)
+    ctx.moveTo(cx - 4, cy - h * 0.58)
+    ctx.lineTo(cx + 5, cy - h * 0.35)
+    ctx.moveTo(cx + 4, cy - h * 0.58)
+    ctx.lineTo(cx - 5, cy - h * 0.35)
+    ctx.moveTo(cx - 5, cy - h * 0.35)
+    ctx.lineTo(cx + 6, cy - 1)
+    ctx.moveTo(cx + 5, cy - h * 0.35)
+    ctx.lineTo(cx - 6, cy - 1)
+    ctx.moveTo(cx - 12, top + 8)
+    ctx.lineTo(cx + 12, top + 8)
+    ctx.moveTo(cx - 10, top + 15)
+    ctx.lineTo(cx + 10, top + 15)
+    ctx.stroke()
+    ctx.lineWidth = 1
+    for (const side of [-1, 1]) {
+      ctx.beginPath()
+      ctx.moveTo(cx + side * 12, top + 8)
+      ctx.lineTo(cx + side * 17, top + 13)
+      ctx.moveTo(cx + side * 10, top + 15)
+      ctx.lineTo(cx + side * 14, top + 20)
+      ctx.stroke()
+    }
+  } else if (t.kind === 'substation') {
+    const [yard, control] = sh
+    box(c, yard.x0, yard.y0, yard.x1, yard.y1, 0, yard.h, hex('#777d7d'), { top: hex('#8c918c') })
+    box(c, control.x0, control.y0, control.x1, control.y1, 0, control.h, hex('#b4b1a7'), {
+      windows: 'band',
+      seed: t.seed,
+      top: hex('#777d7d'),
+    })
+    if (!busy) {
+      for (let k = 0; k < 3; k++) {
+        const tx = x + 0.48 + k * 0.14
+        box(c, tx, y + 0.52, tx + 0.1, y + 0.72, 0, 7, hex('#9c9b8e'), { top: hex('#c1bfae') })
+        const [px, py] = P(tx + 0.05, y + 0.55)
+        ctx.strokeStyle = '#d1cbb7'
+        ctx.lineWidth = 1.2
+        ctx.beginPath()
+        ctx.moveTo(px, py - 7)
+        ctx.lineTo(px, py - 20)
+        ctx.lineTo(px + 5, py - 20)
+        ctx.moveTo(px + 5, py - 20)
+        ctx.lineTo(px + 5, py - 7)
+        ctx.stroke()
+        ctx.fillStyle = '#d1cbb7'
+        ctx.fillRect(px - 1, py - 9, 3, 2)
+        ctx.fillRect(px + 4, py - 9, 3, 2)
+      }
+      const [aX, aY] = P(x + 0.45, y + 0.55)
+      const [bX, bY] = P(x + 0.88, y + 0.55)
+      ctx.strokeStyle = '#b7b9b3'
+      ctx.lineWidth = 1.4
+      ctx.beginPath()
+      ctx.moveTo(aX, aY - 24)
+      ctx.lineTo(bX, bY - 24)
+      ctx.stroke()
+    }
+  } else if (t.kind === 'power') {
     const [hall, tower] = sh
     box(c, hall.x0, hall.y0, hall.x1, hall.y1, 0, hall.h, hex('#9da3a8'), { windows: 'band', seed: t.seed, top: hex('#7b8187') })
     if (!busy) {
@@ -593,20 +797,35 @@ function building(c: Ctx, t: Tile, x: number, y: number) {
   const s = t.seed
   const sh = shapes(t, x, y)
   const building = t.grow < 1
+  const zoneKind = t.kind === 'res' || t.kind === 'com' || t.kind === 'ind' ? t.kind : null
+  const variant = zoneKind && !c.classicZoneArt
+    ? Math.floor(hash(s, t.lvl + (t.dens === 'high' ? 8 : 0), zoneKind === 'res' ? 1 : zoneKind === 'com' ? 2 : 3) * 100)
+    : 0
+  const palette = Math.floor(variant / 10)
+  const detail = variant % 10
   if (t.kind === 'res') {
     const [m] = sh
-    if (t.lvl === 1) {
-      const wall = pick(HOUSE_WALL, s)
+    if (!c.classicZoneArt && t.lotW * t.lotH >= 4) {
+      mansion(c, m, s, palette, building)
+    } else if (t.dens === 'low') {
+      const wall = c.classicZoneArt ? pick(HOUSE_WALL, s) : ZONE_FACADE_STYLES.res[palette]
+      const roofColor = c.classicZoneArt ? pick(ROOF, s * 7.3) : RES_ROOF_STYLES[palette]
       box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, wall, { windows: 'house', seed: s })
-      roof(c, m, pick(ROOF, s * 7.3), s > 0.5)
-      if (!building && s > 0.3) tree(c, x + 0.15, y + 0.85, s, 0.8)
+      roof(c, m, roofColor, s > 0.5)
+    } else if (t.lvl === 1) {
+      const wall = c.classicZoneArt ? pick(HOUSE_WALL, s) : ZONE_FACADE_STYLES.res[palette]
+      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, wall, { windows: 'house', seed: s })
+      roof(c, m, c.classicZoneArt ? pick(ROOF, s * 7.3) : RES_ROOF_STYLES[palette], c.classicZoneArt ? s > 0.5 : detail % 2 === 0)
     } else if (t.lvl === 2) {
-      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, pick(BRICK, s), { windows: 'grid', seed: s, top: hex('#6b6660') })
+      const wall = c.classicZoneArt ? pick(BRICK, s) : mix(pick(BRICK, s), ZONE_FACADE_STYLES.res[palette], 0.45)
+      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, wall, { windows: 'grid', seed: s, top: hex('#6b6660') })
     } else if (t.lvl === 3) {
-      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, pick(CONCRETE, s), { windows: 'grid', seed: s, top: hex('#8f8a82') })
+      const wall = c.classicZoneArt ? pick(CONCRETE, s) : mix(pick(CONCRETE, s), ZONE_FACADE_STYLES.res[palette], 0.3)
+      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, wall, { windows: 'grid', seed: s, top: hex('#8f8a82') })
       if (!building) box(c, m.x0 + 0.15, m.y0 + 0.15, m.x0 + 0.35, m.y0 + 0.35, m.h, 4, hex('#bdb8ae'))
     } else {
-      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, pick(CONCRETE, s * 3.1), {
+      const wall = c.classicZoneArt ? pick(CONCRETE, s * 3.1) : mix(pick(CONCRETE, s * 3.1), ZONE_FACADE_STYLES.res[palette], 0.3)
+      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, wall, {
         windows: 'band',
         seed: s,
         top: hex('#9c978e'),
@@ -616,19 +835,23 @@ function building(c: Ctx, t: Tile, x: number, y: number) {
   } else if (t.kind === 'com') {
     const m = sh[sh.length - 1]
     if (t.lvl === 1) {
-      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, pick(CONCRETE, s), { windows: 'band', seed: s, glass: true })
+      const wall = c.classicZoneArt ? pick(CONCRETE, s) : ZONE_FACADE_STYLES.com[palette]
+      box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, wall, { windows: 'band', seed: s, glass: true })
       // awning
       const col = pick(['#c0392b', '#2e86ab', '#e1a730', '#3c8d5a'].map(hex), s * 5)
       box(c, m.x0, m.y1 - 0.02, m.x1, m.y1 + 0.06, 5, 1.5, col)
     } else if (t.lvl <= 4) {
-      const col = t.lvl === 2 ? pick(CONCRETE, s) : pick(GLASS, s)
+      const col = c.classicZoneArt
+        ? t.lvl === 2 ? pick(CONCRETE, s) : pick(GLASS, s)
+        : t.lvl === 2 ? mix(pick(CONCRETE, s), ZONE_FACADE_STYLES.com[palette], 0.5) : GLASS[palette]
       box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, col, { windows: 'band', seed: s, glass: true, top: hex('#5d6670') })
       if (!building && t.lvl >= 3)
         box(c, m.x0 + 0.12, m.y0 + 0.12, m.x1 - 0.12, m.y1 - 0.12, m.h, 6, hex('#7d868f'))
     } else {
       const [pod, tw] = sh
-      box(c, pod.x0, pod.y0, pod.x1, pod.y1, 0, pod.h, pick(CONCRETE, s), { windows: 'band', seed: s, glass: true })
-      const col = pick(GLASS, s * 2.7)
+      const base = c.classicZoneArt ? pick(CONCRETE, s) : mix(pick(CONCRETE, s), ZONE_FACADE_STYLES.com[palette], 0.5)
+      box(c, pod.x0, pod.y0, pod.x1, pod.y1, 0, pod.h, base, { windows: 'band', seed: s, glass: true })
+      const col = c.classicZoneArt ? pick(GLASS, s * 2.7) : GLASS[palette]
       box(c, tw.x0, tw.y0, tw.x1, tw.y1, pod.h, tw.h - pod.h, col, { windows: 'band', seed: s, glass: true })
       if (!building) {
         const top = tw.h
@@ -645,7 +868,7 @@ function building(c: Ctx, t: Tile, x: number, y: number) {
     }
   } else if (t.kind === 'ind') {
     const [m] = sh
-    const col = pick(IND, s)
+    const col = c.classicZoneArt ? pick(IND, s) : ZONE_FACADE_STYLES.ind[palette]
     box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, col, { top: mix(col, [255, 255, 255], 0.15) })
     if (c.detail) {
       // roof ribs
@@ -669,6 +892,15 @@ function building(c: Ctx, t: Tile, x: number, y: number) {
       tank(c, x + 0.72, y + 0.68, 0.14, m.h + 12, m.h)
     }
   }
+  if (!c.classicZoneArt && zoneKind && !(t.kind === 'res' && t.dens === 'low') && detail > 0 && sh.length > 0)
+    drawZoneVariant(c, t, sh[sh.length - 1], detail, palette, zoneKind)
+  if (
+    zoneKind &&
+    !(t.kind === 'res' && (t.dens === 'low' || !c.classicZoneArt && t.lotW * t.lotH >= 4)) &&
+    sh.length > 0
+  ) {
+    for (const shape of sh) facadeTexture(c, shape, s + shape.x0 * 17.31 + shape.y0 * 41.73)
+  }
   if (building) {
     // construction crane
     const m = sh[sh.length - 1]
@@ -683,6 +915,288 @@ function building(c: Ctx, t: Tile, x: number, y: number) {
     c.ctx.moveTo(ax, top)
     c.ctx.lineTo(ax + 8, top + 2)
     c.ctx.stroke()
+  }
+}
+
+function mansion(c: Ctx, m: Shape, seed: number, palette: number, building: boolean) {
+  const wall = ZONE_FACADE_STYLES.res[palette]
+  const stone = mix(wall, [255, 255, 255], 0.42)
+  const roofColor = RES_ROOF_STYLES[palette]
+  const stories = seed < 0.5 ? 2 : 3
+  const width = m.x1 - m.x0
+  const depth = m.y1 - m.y0
+  const centerX = (m.x0 + m.x1) / 2
+  const floorHeight = 10.5
+  box(c, m.x0, m.y0, m.x1, m.y1, 0, m.h, wall, {
+    windows: 'grid',
+    seed,
+    top: mix(wall, [255, 255, 255], 0.12),
+  })
+  mansionWallTexture(c.ctx, m, palette)
+  roof(c, m, roofColor, seed > 0.5)
+  const wing: Shape = {
+    x0: m.x0 + width * 0.06,
+    y0: m.y0 + depth * 0.08,
+    x1: centerX + width * 0.12,
+    y1: m.y0 + depth * 0.42,
+    h: Math.min(floorHeight * 0.92, m.h * 0.72),
+  }
+  box(c, wing.x0, wing.y0, wing.x1, wing.y1, 0, wing.h, mix(wall, [255, 255, 255], 0.04), {
+    windows: 'band',
+    seed: seed + 0.31,
+    top: mix(wall, [255, 255, 255], 0.16),
+  })
+  mansionWallTexture(c.ctx, wing, palette)
+  roof(c, wing, mix(roofColor, [255, 255, 255], 0.08), seed > 0.5)
+
+  const porchWidth = Math.min(0.46, width * 0.34)
+  const porchX0 = centerX - porchWidth / 2
+  const porchX1 = centerX + porchWidth / 2
+  const porchY = m.y1 + 0.07
+  const porticoTop = Math.min(floorHeight * 0.78, m.h * 0.38)
+  box(c, porchX0 - 0.07, porchY, porchX1 + 0.07, porchY + 0.18, 0, 2, stone, { top: hex('#f4ecdc') })
+  box(c, porchX0 - 0.09, porchY + 0.02, porchX1 + 0.09, porchY + 0.14, porticoTop, 2, stone, {
+    top: hex('#f5eddf'),
+  })
+
+  const ctx = c.ctx
+  const gridLine = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) => {
+    const [sx0, sy0] = P(x0, y0)
+    const [sx1, sy1] = P(x1, y1)
+    ctx.moveTo(sx0, sy0 - z0)
+    ctx.lineTo(sx1, sy1 - z1)
+  }
+  ctx.lineWidth = 0.7
+  ctx.strokeStyle = rgb(stone, 0.9, 0.8)
+  ctx.beginPath()
+  for (let floor = 1; floor <= stories; floor++) {
+    const z = Math.min(m.h - 1, floor * floorHeight)
+    gridLine(m.x0 + 0.025, m.y1 + 0.015, z, m.x1 - 0.025, m.y1 + 0.015, z)
+    gridLine(m.x1 + 0.015, m.y1 - 0.025, z, m.x1 + 0.015, m.y0 + 0.025, z)
+  }
+  const pilasters = [m.x0 + width * 0.08, centerX, m.x1 - width * 0.08]
+  for (const px of pilasters) {
+    gridLine(px, m.y1 + 0.018, 1.2, px, m.y1 + 0.018, m.h - 2)
+    for (const z of [1.2, floorHeight, floorHeight * 2, m.h - 2]) {
+      if (z < m.h) {
+        gridLine(px - 0.035, m.y1 + 0.02, z, px + 0.035, m.y1 + 0.02, z)
+      }
+    }
+  }
+  ctx.stroke()
+
+  const columnXs = [porchX0 + 0.04, porchX1 - 0.04]
+  ctx.lineWidth = 2.1
+  ctx.strokeStyle = rgb(stone, 1)
+  ctx.beginPath()
+  for (const px of columnXs) gridLine(px, porchY + 0.1, 2, px, porchY + 0.1, porticoTop)
+  ctx.stroke()
+
+  if (m.h > floorHeight + 4) {
+    const balconyWidth = Math.min(0.58, width * 0.48)
+    const bx0 = centerX - balconyWidth / 2
+    const bx1 = centerX + balconyWidth / 2
+    const balconyZ = floorHeight + 1.5
+    ctx.lineWidth = 0.8
+    ctx.strokeStyle = rgb(stone, 0.95)
+    ctx.beginPath()
+    gridLine(bx0, m.y1 + 0.055, balconyZ, bx1, m.y1 + 0.055, balconyZ)
+    gridLine(bx0, m.y1 + 0.055, balconyZ + 2.4, bx1, m.y1 + 0.055, balconyZ + 2.4)
+    for (let post = 0; post <= 8; post++) {
+      const px = bx0 + ((bx1 - bx0) * post) / 8
+      gridLine(px, m.y1 + 0.055, balconyZ, px, m.y1 + 0.055, balconyZ + 2.4)
+    }
+    ctx.stroke()
+  }
+
+  ctx.lineWidth = 0.55
+  ctx.strokeStyle = 'rgba(255,255,255,0.28)'
+  ctx.beginPath()
+  for (let course = 0; course < stories * 2; course++) {
+    const z = 2.5 + course * (floorHeight / 2)
+    if (z >= m.h - 1) continue
+    for (let bay = 0; bay < 5; bay++) {
+      const x0 = m.x0 + width * (bay / 5 + 0.035)
+      const x1 = x0 + width * 0.035
+      gridLine(x0, m.y1 + 0.012, z, x1, m.y1 + 0.012, z)
+    }
+  }
+  ctx.stroke()
+
+  const chimneyX = m.x0 + width * 0.19
+  box(
+    c,
+    chimneyX,
+    m.y0 + depth * 0.13,
+    chimneyX + 0.075,
+    m.y0 + depth * 0.22,
+    m.h + 4,
+    7,
+    mix(wall, [90, 75, 65], 0.38),
+  )
+
+  if (!building && seed > 0.3) {
+    tree(c, m.x0 + 0.18, m.y1 + 0.34, seed, 0.58)
+    tree(c, m.x1 - 0.18, m.y1 + 0.34, 1 - seed, 0.58)
+  }
+}
+
+function mansionWallTexture(ctx: CanvasRenderingContext2D, m: Shape, palette: number) {
+  let patterns = mansionPatterns.get(ctx)
+  if (!patterns) {
+    patterns = Array(10).fill(null)
+    mansionPatterns.set(ctx, patterns)
+  }
+  if (!patterns[palette]) {
+    let texture = mansionTextures[palette]
+    if (!texture) {
+      texture = document.createElement('canvas')
+      texture.width = MANSION_TEXTURE_SIZE
+      texture.height = MANSION_TEXTURE_SIZE
+      const textureCtx = texture.getContext('2d')
+      if (!textureCtx) throw new Error('Unable to create mansion detail texture')
+
+      const seed = 0x9e3779b9 ^ (palette * 0x85ebca6b)
+      let state = seed >>> 0
+      const random = () => {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0
+        return state / 0x100000000
+      }
+      const colors = [
+        rgb(mix(ZONE_FACADE_STYLES.res[palette], [60, 48, 40], 0.28), 1, 0.24),
+        rgb(mix(ZONE_FACADE_STYLES.res[palette], [255, 255, 255], 0.75), 1, 0.38),
+        rgb(mix(ZONE_FACADE_STYLES.res[palette], [120, 100, 82], 0.42), 1, 0.2),
+        rgb(mix(ZONE_FACADE_STYLES.res[palette], [255, 255, 255], 0.42), 1, 0.3),
+      ]
+      for (let group = 0; group < colors.length; group++) {
+        textureCtx.fillStyle = colors[group]
+        for (let i = 0; i < 2500; i++) {
+          const x = random() * MANSION_TEXTURE_SIZE
+          const y = random() * MANSION_TEXTURE_SIZE
+          const width = 0.35 + random() * (group === 3 ? 1.1 : 1.8)
+          const height = group === 1 ? 0.35 + random() * 0.8 : 0.35 + random() * 1.35
+          textureCtx.fillRect(x, y, width, height)
+        }
+      }
+      mansionTextures[palette] = texture
+    }
+    patterns[palette] = ctx.createPattern(texture, 'repeat')
+    if (!patterns[palette]) throw new Error('Unable to create mansion detail pattern')
+  }
+
+  const pattern = patterns[palette]
+  if (!pattern) throw new Error('Mansion detail pattern was not initialized')
+  const A = P(m.x0, m.y1)
+  const B = P(m.x1, m.y1)
+  const C = P(m.x1, m.y0)
+  const D = P(m.x0, m.y0)
+  ctx.save()
+  ctx.globalAlpha *= 0.22
+  ctx.fillStyle = pattern
+  for (const points of [
+    [
+      [A[0], A[1]],
+      [B[0], B[1]],
+      [B[0], B[1] - m.h],
+      [A[0], A[1] - m.h],
+    ],
+    [
+      [B[0], B[1]],
+      [C[0], C[1]],
+      [C[0], C[1] - m.h],
+      [B[0], B[1] - m.h],
+    ],
+  ]) {
+    ctx.beginPath()
+    ctx.moveTo(points[0][0], points[0][1])
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1])
+    ctx.closePath()
+    ctx.save()
+    ctx.clip()
+    ctx.fillRect(
+      Math.min(A[0], D[0]) - MANSION_TEXTURE_SIZE,
+      Math.min(A[1], C[1]) - m.h - MANSION_TEXTURE_SIZE,
+      Math.abs(C[0] - A[0]) + MANSION_TEXTURE_SIZE * 2,
+      Math.abs(B[1] - D[1]) + m.h + MANSION_TEXTURE_SIZE * 2,
+    )
+    ctx.restore()
+  }
+  ctx.restore()
+}
+
+function drawZoneVariant(c: Ctx, t: Tile, m: Shape, detail: number, palette: number, kind: 'res' | 'com' | 'ind') {
+  if (t.grow < 1) return
+  const width = m.x1 - m.x0
+  const depth = m.y1 - m.y0
+  const accent = mix(ZONE_FACADE_STYLES[kind][palette], [255, 255, 255], 0.3)
+  const centerX = (m.x0 + m.x1) / 2
+  const centerY = (m.y0 + m.y1) / 2
+
+  if (kind === 'res') {
+    if (detail === 1 || detail === 7) {
+      const chimneyX = m.x1 - Math.min(0.12, width * 0.18)
+      box(c, chimneyX, m.y0 + depth * 0.18, chimneyX + 0.06, m.y0 + depth * 0.3, m.h + 3, detail === 1 ? 5 : 8, accent)
+    } else if (detail === 2 || detail === 5 || detail === 8) {
+      const porchWidth = Math.min(detail === 8 ? 0.48 : 0.38, width * 0.72)
+      const porchX0 = centerX - porchWidth / 2
+      const porchX1 = centerX + porchWidth / 2
+      const porchY = m.y1 - Math.min(0.08, depth * 0.12)
+      box(c, porchX0, porchY, porchX1, porchY + 0.14, 0, 2, accent)
+      if (detail === 5) {
+        for (const columnX of [porchX0 + 0.025, porchX1 - 0.045]) {
+          box(c, columnX, porchY + 0.025, columnX + 0.02, porchY + 0.07, 2, Math.max(3, m.h * 0.55 - 2), hex('#eee7d9'))
+        }
+        box(c, porchX0 - 0.03, porchY - 0.025, porchX1 + 0.03, porchY + 0.08, m.h * 0.55, 2, accent)
+      } else if (detail === 8) {
+        box(c, porchX0 - 0.02, porchY - 0.03, porchX1 + 0.02, porchY + 0.08, m.h * 0.62, 2, accent)
+      }
+    } else if (detail === 3 || detail === 9) {
+      const dormerX = detail === 3 ? centerX - 0.08 : m.x0 + width * 0.25
+      box(c, dormerX, centerY - 0.05, dormerX + 0.16, centerY + 0.05, m.h + 3, 4, accent, { windows: 'house', seed: t.seed })
+    } else if (detail === 4) {
+      box(c, centerX - 0.1, m.y1 - 0.025, centerX + 0.1, m.y1 + 0.04, 2, 4, accent, { windows: 'band', seed: t.seed })
+    } else if (detail === 6) {
+      const wingWidth = Math.min(0.24, width * 0.28)
+      box(c, m.x0 + 0.04, centerY - 0.1, m.x0 + 0.04 + wingWidth, centerY + 0.1, 0, m.h * 0.62, accent, {
+        windows: 'house',
+        seed: t.seed,
+      })
+    }
+    return
+  }
+
+  if (kind === 'com') {
+    if (detail <= 3) {
+      const bandHeight = detail === 1 ? 1.5 : detail === 2 ? 3 : 4.5
+      box(c, m.x0 + 0.04, m.y0 + 0.04, m.x1 - 0.04, m.y1 - 0.04, m.h, bandHeight, accent)
+    } else if (detail <= 6) {
+      const trimWidth = Math.min(0.045, width * 0.12)
+      const trimXs =
+        detail === 4 ? [m.x0 + 0.06] : detail === 5 ? [m.x1 - 0.06 - trimWidth] : [m.x0 + 0.06, m.x1 - 0.06 - trimWidth]
+      for (const trimX of trimXs) {
+        box(c, trimX, m.y0 + 0.06, trimX + trimWidth, m.y1 - 0.06, 0, m.h, accent)
+      }
+    } else if (detail <= 8) {
+      const unitWidth = Math.min(0.14, width * 0.25)
+      box(c, centerX - unitWidth / 2, centerY - 0.08, centerX + unitWidth / 2, centerY + 0.08, m.h, detail === 7 ? 4 : 7, accent)
+    } else {
+      const inset = Math.min(0.12, width * 0.18, depth * 0.18)
+      box(c, m.x0 + inset, m.y0 + inset, m.x1 - inset, m.y1 - inset, m.h, 5, accent)
+    }
+    return
+  }
+
+  if (detail <= 3) {
+    const ventSize = Math.min(0.12, width * 0.22, depth * 0.22)
+    const ventX = m.x0 + 0.08 + ((detail - 1) % 2) * Math.max(0.12, width - ventSize - 0.16)
+    box(c, ventX, centerY - ventSize / 2, ventX + ventSize, centerY + ventSize / 2, m.h, detail === 3 ? 5 : 3, accent)
+  } else if (detail <= 6) {
+    const skylightX = m.x0 + width * (detail === 4 ? 0.25 : detail === 5 ? 0.5 : 0.68)
+    box(c, skylightX, centerY - 0.1, skylightX + Math.min(0.18, width * 0.24), centerY + 0.1, m.h, 2, hex('#8fb3bd'))
+  } else {
+    const stackX = m.x0 + width * (detail === 7 ? 0.28 : detail === 8 ? 0.5 : 0.72)
+    box(c, stackX, centerY - 0.06, stackX + Math.min(0.07, width * 0.12), centerY + 0.06, m.h, detail === 9 ? 16 : 10, accent)
+    box(c, stackX - 0.025, centerY - 0.08, stackX + Math.min(0.095, width * 0.16), centerY + 0.08, m.h + (detail === 9 ? 14 : 8), 2, hex('#777b7b'))
   }
 }
 
@@ -760,6 +1274,7 @@ function ground(c: Ctx, city: City, t: Tile, x: number, y: number) {
     const w = Math.sin(c.t * 1.3 + x * 0.7 + y * 0.4) * 0.04
     ctx.fillStyle = rgb(WATER, 1 + w)
     ctx.fill()
+    waterRipples(c, x, y)
     // shoreline
     for (const [dx, dy] of DIRS) {
       const n = city.tile(x + dx, y + dy)
@@ -769,18 +1284,21 @@ function ground(c: Ctx, city: City, t: Tile, x: number, y: number) {
     diamond()
     let col = pick(GRASS, t.seed)
     if (t.kind === 'park') col = mix(col, hex('#8fbf5a'), 0.45)
-    if (isService(t.kind)) col = hex('#b4afa4')
+    if (isService(t.kind) || t.kind === 'pylon') col = hex('#b4afa4')
     if (t.ruin) col = hex('#5b5248')
     if (isZone(t.kind) && t.lvl > 0) {
       col = t.kind === 'res' ? mix(col, hex('#86a35c'), 0.3) : t.kind === 'com' ? hex('#b8b3a8') : hex('#8f8b82')
     }
     ctx.fillStyle = rgb(col)
     ctx.fill()
+    if (t.kind === 'none' || t.kind === 'park' || isZone(t.kind) && t.lvl > 0) {
+      groundTexture(c, x, y, t.seed, mix(col, hex('#283020'), 0.34), t.kind === 'park' ? 8 : 5)
+    }
   }
 
   if (t.kind === 'road') road(c, city, t, x, y)
   else if (t.kind === 'highway') highway(c, x, y)
-  else if (isZone(t.kind) && t.lvl === 0 && !t.ruin) {
+  else if (isZone(t.kind) && t.lvl === 0 && !t.ruin && t.lotId == null) {
     gp(ctx, [x + 0.08, y + 0.08, x + 0.92, y + 0.08, x + 0.92, y + 0.92, x + 0.08, y + 0.92])
     ctx.fillStyle = rgb(ZONE[t.kind], 1, 0.28)
     ctx.fill()
@@ -842,6 +1360,10 @@ function road(c: Ctx, city: City, t: Tile, x: number, y: number) {
   gp(ctx, [x, y, x + 1, y, x + 1, y + 1, x, y + 1])
   ctx.fillStyle = t.road === 'gravel' ? '#9a8c72' : rgb(t.road === 'avenue' ? hex('#36383d') : ASPHALT)
   ctx.fill()
+  roadTexture(c, x, y, t.seed)
+  ctx.strokeStyle = 'rgba(225,220,205,0.24)'
+  ctx.lineWidth = 0.7
+  ctx.stroke()
   let links = 0
   const conn: [number, number][] = []
   for (const [dx, dy] of DIRS) {
@@ -876,6 +1398,26 @@ function road(c: Ctx, city: City, t: Tile, x: number, y: number) {
       ctx.stroke()
     }
     ctx.setLineDash([])
+    return
+  }
+  const straight =
+    conn.length === 2 &&
+    ((conn[0][0] === -conn[1][0] && conn[0][1] === 0 && conn[1][1] === 0) ||
+      (conn[0][1] === -conn[1][1] && conn[0][0] === 0 && conn[1][0] === 0))
+  if (straight) {
+    const alongX = conn[0][0] !== 0
+    const line = (offset: number) => {
+      const a = alongX ? P(x, y + offset) : P(x + offset, y)
+      const b = alongX ? P(x + 1, y + offset) : P(x + offset, y + 1)
+      ctx.beginPath()
+      ctx.moveTo(a[0], a[1])
+      ctx.lineTo(b[0], b[1])
+      ctx.stroke()
+    }
+    ctx.strokeStyle = 'rgba(255,205,80,0.9)'
+    ctx.lineWidth = 0.85
+    line(0.485)
+    line(0.515)
     return
   }
   ctx.strokeStyle = links >= 3 ? 'rgba(240,240,235,0.8)' : 'rgba(236,200,90,0.85)'
@@ -1131,14 +1673,305 @@ function heatColor(v: number, a = 0.6) {
   return `rgba(${r | 0},${g | 0},70,${a})`
 }
 
+function powerLines(c: Ctx, city: City, visible: (x: number, y: number) => boolean) {
+  const { ctx } = c
+  const cableSpans = new Map<
+    string,
+    [[number, number], [number, number], OverheadLineType]
+  >()
+  const lineHeight: Record<OverheadLineType, number> = {
+    transmission: 84,
+    distribution: 56,
+    service: 34,
+    swer: 46,
+  }
+  const wireHeight: Record<OverheadLineType, number> = {
+    transmission: 80,
+    distribution: 54,
+    service: 32,
+    swer: 44,
+  }
+  const conductorCount: Record<OverheadLineType, number> = {
+    transmission: 3,
+    distribution: 3,
+    service: 2,
+    swer: 1,
+  }
+  for (let i = 0; i < city.tiles.length; i++) {
+    const tile = city.tiles[i]
+    if (!tile.overheadCable) continue
+    const type = tile.overheadType ?? 'distribution'
+    const x = i % N
+    const y = (i / N) | 0
+    for (const [dx, dy] of DIRS) {
+      const nx = x + dx
+      const ny = y + dy
+      const neighbor = city.tile(nx, ny)
+      if (
+        !neighbor ||
+        !(neighbor.overheadCable ||
+          neighbor.kind === 'pylon' ||
+          neighbor.kind === 'substation' ||
+          neighbor.kind === 'road' && neighbor.connected) ||
+        !visible(x, y) && !visible(nx, ny)
+      )
+        continue
+      const a: [number, number] = i < idx(nx, ny) ? [x, y] : [nx, ny]
+      const b: [number, number] = i < idx(nx, ny) ? [nx, ny] : [x, y]
+      cableSpans.set(`${idx(a[0], a[1])}:${idx(b[0], b[1])}`, [a, b, type])
+    }
+  }
+  for (const [[ax, ay], [bx, by], type] of cableSpans.values()) {
+    const [count, height] = [conductorCount[type], wireHeight[type]]
+    const [a0, a1] = P(ax + 0.5, ay + 0.5)
+    const [b0, b1] = P(bx + 0.5, by + 0.5)
+    const dx = b0 - a0
+    const dy = b1 - a1
+    const length = Math.hypot(dx, dy) || 1
+    const nx = -dy / length
+    const ny = dx / length
+    const spacing = type === 'transmission' ? 5 : 3
+    ctx.setLineDash(type === 'swer' ? [5, 3] : [])
+    for (let conductor = 0; conductor < count; conductor++) {
+      const offset = (conductor - (count - 1) / 2) * spacing
+      const startX = a0 + nx * offset
+      const startY = a1 - height + ny * offset
+      const endX = b0 + nx * offset
+      const endY = b1 - height + ny * offset
+      ctx.beginPath()
+      ctx.moveTo(startX, startY)
+      ctx.quadraticCurveTo((startX + endX) / 2, (startY + endY) / 2 + 3, endX, endY)
+      ctx.strokeStyle = type === 'transmission' ? '#d2d7d2' : '#c7c9c4'
+      ctx.lineWidth = type === 'transmission' ? 1.1 : 0.9
+      ctx.stroke()
+    }
+    ctx.setLineDash([])
+  }
+
+  for (let i = 0; i < city.tiles.length; i++) {
+    const tile = city.tiles[i]
+    if (!tile.overheadCable) continue
+    const type = tile.overheadType ?? 'distribution'
+    const x = i % N
+    const y = (i / N) | 0
+    if (!visible(x, y)) continue
+    const sameTypeNeighbors = DIRS.filter(([dx, dy]) => {
+      const neighbor = city.tile(x + dx, y + dy)
+      return neighbor?.overheadCable && (neighbor.overheadType ?? 'distribution') === type
+    })
+    const isBend =
+      sameTypeNeighbors.length === 2 &&
+      sameTypeNeighbors[0][0] !== -sameTypeNeighbors[1][0] &&
+      sameTypeNeighbors[0][1] !== -sameTypeNeighbors[1][1]
+    const supportSpacing = type === 'transmission' || type === 'swer' ? 4 : type === 'distribution' ? 2 : 1
+    if (sameTypeNeighbors.length === 2 && !isBend && (x + y) % supportSpacing !== 0) continue
+
+    const height = lineHeight[type]
+    const metal = type === 'transmission' ? '#aab2b0' : type === 'service' ? '#937959' : '#88735b'
+    const armHeight = wireHeight[type] - 5
+    const shaftWidth = type === 'transmission' ? 0.022 : type === 'service' ? 0.03 : 0.038
+    const shaftColor = hex(metal)
+    const shaftHighlight = rgb(shaftColor, 1.25)
+    const shaftShadow = rgb(shaftColor, 0.58)
+    const pole = (gx: number, gy: number, poleHeight: number) => {
+      const [px, py] = P(gx, gy)
+      ctx.lineCap = 'round'
+      ctx.strokeStyle = shaftShadow
+      ctx.lineWidth = type === 'transmission' ? 2.3 : 2
+      ctx.beginPath()
+      ctx.moveTo(px + 0.6, py)
+      ctx.lineTo(px + 0.6, py - poleHeight)
+      ctx.stroke()
+      ctx.strokeStyle = shaftHighlight
+      ctx.lineWidth = 0.8
+      ctx.beginPath()
+      ctx.moveTo(px - 0.3, py - 1)
+      ctx.lineTo(px - 0.3, py - poleHeight)
+      ctx.stroke()
+      return [px, py - poleHeight] as const
+    }
+
+    if (type === 'transmission') {
+      const feet: [number, number][] = [
+        [x + 0.34, y + 0.34],
+        [x + 0.66, y + 0.34],
+        [x + 0.34, y + 0.66],
+        [x + 0.66, y + 0.66],
+      ]
+      const top: [number, number][] = [
+        [x + 0.45, y + 0.45],
+        [x + 0.55, y + 0.45],
+        [x + 0.45, y + 0.55],
+        [x + 0.55, y + 0.55],
+      ]
+      for (let leg = 0; leg < feet.length; leg++) {
+        const [fx, fy] = P(...feet[leg])
+        const [tx, ty] = P(...top[leg])
+        ctx.strokeStyle = shaftShadow
+        ctx.lineWidth = 1.3
+        ctx.beginPath()
+        ctx.moveTo(fx, fy - 3)
+        ctx.lineTo(tx, ty - height)
+        ctx.stroke()
+        ctx.strokeStyle = shaftHighlight
+        ctx.lineWidth = 0.55
+        ctx.beginPath()
+        ctx.moveTo(fx - 0.4, fy - 3)
+        ctx.lineTo(tx - 0.4, ty - height)
+        ctx.stroke()
+      }
+      for (const [level, halfWidth] of [[0.55, 0.27], [0.75, 0.23], [0.93, 0.19]] as const) {
+        const z = height * level
+        const [aX, aY] = P(x + 0.5 - halfWidth, y + 0.5)
+        const [bX, bY] = P(x + 0.5 + halfWidth, y + 0.5)
+        ctx.strokeStyle = shaftShadow
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        ctx.moveTo(aX, aY - z)
+        ctx.lineTo(bX, bY - z)
+        ctx.stroke()
+        ctx.strokeStyle = shaftHighlight
+        ctx.lineWidth = 0.8
+        ctx.beginPath()
+        ctx.moveTo(aX, aY - z - 0.5)
+        ctx.lineTo(bX, bY - z - 0.5)
+        ctx.stroke()
+      }
+      const [cx, cy] = P(x + 0.5, y + 0.5)
+      ctx.strokeStyle = shaftShadow
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(cx - 3, cy - height * 0.55)
+      ctx.lineTo(cx + 3, cy - height * 0.75)
+      ctx.moveTo(cx + 3, cy - height * 0.55)
+      ctx.lineTo(cx - 3, cy - height * 0.75)
+      ctx.stroke()
+    } else {
+      const [poleX, poleY] = pole(x + 0.5, y + 0.5, height)
+      const armHalfWidth = type === 'distribution' ? 10 : type === 'service' ? 5 : 8
+      const armZ = type === 'service' ? armHeight + 1 : armHeight
+      ctx.strokeStyle = shaftShadow
+      ctx.lineWidth = 2.4
+      ctx.beginPath()
+      ctx.moveTo(poleX - armHalfWidth, poleY + height - armZ)
+      ctx.lineTo(poleX + armHalfWidth, poleY + height - armZ)
+      ctx.stroke()
+      ctx.strokeStyle = shaftHighlight
+      ctx.lineWidth = 0.9
+      ctx.beginPath()
+      ctx.moveTo(poleX - armHalfWidth, poleY + height - armZ - 0.6)
+      ctx.lineTo(poleX + armHalfWidth, poleY + height - armZ - 0.6)
+      ctx.stroke()
+      const insulators = type === 'distribution' ? [-5, 0, 5] : type === 'service' ? [-2, 2] : [0]
+      for (const offset of insulators) {
+        ctx.fillStyle = '#b7b2a4'
+        ctx.beginPath()
+        ctx.ellipse(poleX + offset, poleY + height - armZ - 1.5, 1.5, 2.2, 0, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      if (type === 'swer') {
+        const [px, py] = P(x + 0.68, y + 0.5)
+        ctx.strokeStyle = '#a99568'
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(px, py - 2)
+        ctx.lineTo(px, py + 4)
+        ctx.moveTo(px - 4, py + 4)
+        ctx.lineTo(px + 4, py + 4)
+        ctx.stroke()
+      }
+    }
+    ctx.lineCap = 'butt'
+  }
+
+  const spans = new Map<string, [[number, number], [number, number], number]>()
+  for (let i = 0; i < city.tiles.length; i++) {
+    const tile = city.tiles[i]
+    if (tile.kind !== 'pylon' || !tile.power) continue
+    const x = i % N
+    const y = (i / N) | 0
+    let nearest = Infinity
+    let target: [number, number] | null = null
+    for (let dy = -8; dy <= 8; dy++) {
+      for (let dx = -8; dx <= 8; dx++) {
+        const distance = dx * dx + dy * dy
+        if (distance === 0 || distance > 64 || distance > nearest) continue
+        const nx = x + dx
+        const ny = y + dy
+        if (!inside(nx, ny)) continue
+        const neighbor = city.tiles[idx(nx, ny)]
+        if (
+          !neighbor.power ||
+          !(neighbor.kind === 'pylon' ||
+            neighbor.kind === 'substation' ||
+            neighbor.undergroundCable ||
+            neighbor.overheadCable ||
+            neighbor.kind === 'road' && neighbor.connected)
+        )
+          continue
+        nearest = distance
+        target = [nx, ny]
+      }
+    }
+    if (!target || !visible(x, y) && !visible(target[0], target[1])) continue
+    const [nx, ny] = target
+    const a: [number, number] = i < idx(nx, ny) ? [x, y] : [nx, ny]
+    const b: [number, number] = i < idx(nx, ny) ? [nx, ny] : [x, y]
+    const key = `${idx(a[0], a[1])}:${idx(b[0], b[1])}`
+    if (!spans.has(key)) spans.set(key, [a, b, i])
+  }
+
+  ctx.strokeStyle = 'rgba(205,211,209,0.65)'
+  ctx.lineWidth = 0.8
+  for (const [[ax, ay], [bx, by]] of spans.values()) {
+    const [a0, a1] = P(ax + 0.5, ay + 0.5)
+    const [b0, b1] = P(bx + 0.5, by + 0.5)
+    ctx.beginPath()
+    for (const offset of [-4, 0, 4]) {
+      ctx.moveTo(a0 + offset, a1 - 48)
+      ctx.quadraticCurveTo((a0 + b0) / 2 + offset, (a1 + b1) / 2 - 54, b0 + offset, b1 - 48)
+    }
+    ctx.stroke()
+  }
+
+  ctx.save()
+  ctx.shadowColor = '#ffe58a'
+  ctx.shadowBlur = 7
+  for (const [[ax, ay], [bx, by], seed] of spans.values()) {
+    const [a0, a1] = P(ax + 0.5, ay + 0.5)
+    const [b0, b1] = P(bx + 0.5, by + 0.5)
+    const phase = ((c.t * 0.45 + hash(ax + ay, bx, seed)) % 1 + 1) % 1
+    for (let pulse = 0; pulse < 2; pulse++) {
+      const progress = (phase + pulse * 0.5) % 1
+      const inverse = 1 - progress
+      const px = inverse * inverse * a0 + 2 * inverse * progress * ((a0 + b0) / 2) + progress * progress * b0
+      const py = inverse * inverse * (a1 - 48) + 2 * inverse * progress * ((a1 + b1) / 2 - 54) + progress * progress * (b1 - 48)
+      ctx.beginPath()
+      ctx.arc(px, py, 1.8, 0, Math.PI * 2)
+      ctx.fillStyle = '#fff2b0'
+      ctx.fill()
+    }
+  }
+  ctx.restore()
+}
+
 function infoView(ctx: CanvasRenderingContext2D, city: City, view: View, visible: (x: number, y: number) => boolean) {
   for (let y = 0; y < N; y++) {
     for (let x = 0; x < N; x++) {
       if (!visible(x, y)) continue
       const t = city.tiles[idx(x, y)]
       let fill: string | null = null
-      const built = (isZone(t.kind) && t.lvl > 0) || isService(t.kind)
-      if (view === 'power' && built)
+      const built =
+        (isZone(t.kind) && t.lvl > 0) ||
+        isService(t.kind) ||
+        t.kind === 'pylon' ||
+        t.undergroundCable ||
+        t.overheadCable
+      if (view === 'power' && (t.undergroundCable || t.overheadCable))
+        fill = t.power ? 'rgba(250,210,60,0.7)' : 'rgba(230,60,50,0.7)'
+      else if (view === 'power' && (t.kind === 'road' || t.kind === 'pylon'))
+        fill = t.power ? 'rgba(250,210,60,0.7)' : t.kind === 'pylon' ? 'rgba(230,60,50,0.7)' : null
+      else if (view === 'power' && built)
         fill = t.power || t.kind === 'power' || t.kind === 'solar' || t.kind === 'wind' ? 'rgba(250,210,60,0.7)' : 'rgba(230,60,50,0.7)'
       else if (view === 'water' && t.pipe) fill = t.pipeOn ? 'rgba(40,140,255,0.85)' : 'rgba(120,130,150,0.8)'
       else if (view === 'water' && built) fill = t.waterOk || t.kind === 'pump' ? 'rgba(70,160,240,0.45)' : 'rgba(230,60,50,0.7)'
@@ -1238,7 +2071,7 @@ export function render(
     for (let x = 0; x < N; x++) {
       if (!visible(x, y)) continue
       const tl = city.tiles[idx(x, y)]
-      if ((tl.lvl > 0 && isZone(tl.kind)) || isService(tl.kind)) {
+      if ((tl.lvl > 0 && isZone(tl.kind)) || isService(tl.kind) || tl.kind === 'pylon') {
         for (const m of shapes(tl, x, y)) shadowOf(c, m.x0, m.y0, m.x1, m.y1, m.h)
       }
       if (tl.trees && (tl.kind === 'none' || tl.kind === 'park')) {
@@ -1305,9 +2138,11 @@ export function render(
           const [sx, sy] = P(x + 0.5, y + 0.5)
           c.icons.push([sx, sy - top - 12, tl.problem])
         }
-      } else if (isService(tl.kind)) service(c, tl, x, y)
+      } else if (isService(tl.kind) || tl.kind === 'pylon') service(c, tl, x, y)
     }
   }
+
+  powerLines(c, city, visible)
 
   // smoke
   for (const p of city.puffs) {
@@ -1426,6 +2261,23 @@ export function render(
   }
 
   // tool overlay (drawn after grading so it stays legible)
+  const activeKind = ov.tool === 'pan' || ov.tool === 'inspect' ? undefined : ITEM[ov.tool].kind
+  if (activeKind && isZone(activeKind)) {
+    const zoning = city.zoningTiles()
+    for (let i = 0; i < zoning.length; i++) {
+      if (!zoning[i] || !visible(i % N, (i / N) | 0)) continue
+      const tile = city.tiles[i]
+      if (tile.kind !== 'none') continue
+      const x = i % N
+      const y = (i / N) | 0
+      gp(ctx, [x, y, x + 1, y, x + 1, y + 1, x, y + 1])
+      ctx.fillStyle = 'rgba(127,209,122,0.08)'
+      ctx.fill()
+      ctx.strokeStyle = 'rgba(175,235,150,0.42)'
+      ctx.lineWidth = 0.65 / cam.z
+      ctx.stroke()
+    }
+  }
   if (ov.selected) {
     const [x, y] = ov.selected
     gp(ctx, [x, y, x + 1, y, x + 1, y + 1, x, y + 1])
@@ -1497,6 +2349,7 @@ export function drawPreview(canvas: HTMLCanvasElement, id: ItemId) {
     t: 1.3,
     noLights: false,
     grime: 0,
+    classicZoneArt: true,
   }
   const g = ctx.createLinearGradient(0, 0, 0, H)
   g.addColorStop(0, '#f6d7a8')
@@ -1531,8 +2384,14 @@ export function drawPreview(canvas: HTMLCanvasElement, id: ItemId) {
     problem: null,
     dens: 'low',
     road: 'street',
+    lotId: null,
+    lotW: 0,
+    lotH: 0,
     pipe: false,
     pipeOn: false,
+    undergroundCable: false,
+    overheadCable: false,
+    overheadType: null,
     eduCov: true,
     ...extra,
   })
@@ -1547,12 +2406,16 @@ export function drawPreview(canvas: HTMLCanvasElement, id: ItemId) {
     for (const k of [3, 4, 5]) Object.assign(grid[k], { kind: 'road', road: item.road })
   } else if (item.kind && isZone(item.kind)) {
     const high = item.dens === 'high'
-    centre.kind = item.kind
-    centre.dens = item.dens ?? 'low'
-    centre.lvl = item.kind === 'ind' ? (high ? 3 : 2) : high ? (item.kind === 'com' ? 5 : 4) : item.kind === 'com' ? 1 : 1
-    centre.seed = 0.7
+    const levels = item.kind === 'com' && high ? [3, 4, 5] : null
+    for (const [position, tileIndex] of [3, 4, 5].entries()) {
+      Object.assign(grid[tileIndex], {
+        kind: item.kind,
+        dens: item.dens ?? 'low',
+        lvl: levels?.[position] ?? (item.kind === 'ind' ? (high ? 3 : 2) : high ? 4 : 1),
+        seed: [0.34, 0.62, 0.83][position],
+      })
+    }
     tall = high ? 150 : 40
-    for (const k of [3, 5]) Object.assign(grid[k], { kind: item.kind, dens: centre.dens, lvl: Math.max(1, centre.lvl - 1), seed: 0.3 + k * 0.1 })
     for (const k of [6, 7, 8]) Object.assign(grid[k], { kind: 'road' })
   } else if (item.kind === 'park') {
     centre.kind = 'park'
@@ -1560,11 +2423,25 @@ export function drawPreview(canvas: HTMLCanvasElement, id: ItemId) {
     centre.seed = 0.8
   } else if (item.kind) {
     centre.kind = item.kind
-    tall = item.kind === 'wind' ? 100 : 60
+    tall = item.kind === 'wind' ? 100 : item.kind === 'pylon' ? 80 : 60
     for (const k of [6, 7, 8]) Object.assign(grid[k], { kind: 'road' })
     if (item.kind === 'pump') for (const k of [2, 5, 8]) Object.assign(grid[k], { water: true, kind: 'none' })
   } else if (id === 'pipe') {
     for (const k of [1, 4, 7]) grid[k].pipe = true
+  } else if (id === 'cable') {
+    for (const k of [1, 4, 7]) grid[k].undergroundCable = true
+  } else if (id.startsWith('overhead_')) {
+    const type: OverheadLineType = id === 'overhead_transmission'
+      ? 'transmission'
+      : id === 'overhead_service'
+        ? 'service'
+        : id === 'overhead_swer'
+          ? 'swer'
+          : 'distribution'
+    for (const k of [1, 4, 7]) {
+      grid[k].overheadCable = true
+      grid[k].overheadType = type
+    }
   } else {
     centre.ruin = true
   }
@@ -1583,12 +2460,52 @@ export function drawPreview(canvas: HTMLCanvasElement, id: ItemId) {
     ctx.moveTo(a[0], a[1])
     ctx.lineTo(b[0], b[1])
     ctx.stroke()
+  } else if (id === 'cable' || id.startsWith('overhead_')) {
+    const overhead = id.startsWith('overhead_')
+    const type: OverheadLineType = id === 'overhead_transmission'
+      ? 'transmission'
+      : id === 'overhead_service'
+        ? 'service'
+        : id === 'overhead_swer'
+          ? 'swer'
+          : 'distribution'
+    const height = type === 'transmission' ? 34 : type === 'distribution' ? 27 : type === 'service' ? 20 : 24
+    const conductors = type === 'transmission' || type === 'distribution' ? 3 : type === 'service' ? 2 : 1
+    ctx.strokeStyle = id === 'cable' ? '#e9b824' : '#d0d5d4'
+    ctx.lineWidth = id === 'cable' ? 3 : type === 'transmission' ? 1.3 : 1
+    if (id === 'cable') ctx.setLineDash([5, 3])
+    const a = P(1.5, 0.5)
+    const b = P(1.5, 2.5)
+    for (let wire = 0; wire < conductors; wire++) {
+      const offset = (wire - (conductors - 1) / 2) * 3
+      ctx.beginPath()
+      ctx.moveTo(a[0] + offset, a[1] - (overhead ? height : 0))
+      ctx.lineTo(b[0] + offset, b[1] - (overhead ? height : 0))
+      ctx.stroke()
+    }
+    if (overhead) {
+      const poleColor = type === 'transmission' ? '#747d7d' : type === 'service' ? '#82684c' : '#75634f'
+      ctx.strokeStyle = poleColor
+      ctx.lineWidth = type === 'transmission' ? 2 : 1.5
+      for (const y of [0.5, 1.5, 2.5]) {
+        const [px, py] = P(1.5, y)
+        const top = py - height
+        ctx.beginPath()
+        ctx.moveTo(px, py)
+        ctx.lineTo(px, top)
+        ctx.moveTo(px - (type === 'transmission' ? 8 : 5), top + 5)
+        ctx.lineTo(px + (type === 'transmission' ? 8 : 5), top + 5)
+        ctx.stroke()
+      }
+    }
+    ctx.setLineDash([])
   }
   ctx.fillStyle = 'rgba(20,16,30,0.3)'
   for (let y = 0; y < 3; y++)
     for (let x = 0; x < 3; x++) {
       const t = grid[y * 3 + x]
-      if ((t.lvl > 0 && isZone(t.kind)) || isService(t.kind)) for (const m of shapes(t, x, y)) shadowOf(c, m.x0, m.y0, m.x1, m.y1, m.h)
+      if ((t.lvl > 0 && isZone(t.kind)) || isService(t.kind) || t.kind === 'pylon')
+        for (const m of shapes(t, x, y)) shadowOf(c, m.x0, m.y0, m.x1, m.y1, m.h)
     }
   for (let s = 0; s < 5; s++)
     for (let x = Math.max(0, s - 2); x <= Math.min(2, s); x++) {
@@ -1597,6 +2514,6 @@ export function drawPreview(canvas: HTMLCanvasElement, id: ItemId) {
       if (t.trees && t.kind !== 'road') for (let k = 0; k < t.trees; k++) tree(c, x + TREE_SPOTS[k][0], y + TREE_SPOTS[k][1], hash(t.seed, k, 1))
       if (t.ruin) rubble(c, t, x, y)
       else if (t.lvl > 0 && isZone(t.kind)) building(c, t, x, y)
-      else if (isService(t.kind)) service(c, t, x, y)
+      else if (isService(t.kind) || t.kind === 'pylon') service(c, t, x, y)
     }
 }

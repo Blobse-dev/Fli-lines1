@@ -15,6 +15,13 @@ export type ItemId =
   | 'power'
   | 'solar'
   | 'wind'
+  | 'pylon'
+  | 'substation'
+  | 'cable'
+  | 'overhead_transmission'
+  | 'overhead_distribution'
+  | 'overhead_service'
+  | 'overhead_swer'
   | 'pump'
   | 'pipe'
   | 'fire'
@@ -50,8 +57,8 @@ export const ITEMS: Item[] = [
     unit: 'tile',
     kind: 'road',
     road: 'street',
-    desc: 'Two-lane street with sidewalks. Zones grow along it.',
-    good: ['Cheap', 'Gives zones road access'],
+    desc: 'Two-lane street with sidewalks and built-in underground power cables.',
+    good: ['Cheap', 'Gives zones road access', 'Carries low-voltage electricity'],
     bad: ['Jams once traffic builds up'],
   },
   {
@@ -63,8 +70,8 @@ export const ITEMS: Item[] = [
     unit: 'tile',
     kind: 'road',
     road: 'avenue',
-    desc: 'Four lanes split by a tree-lined median. Drag over a street to upgrade it.',
-    good: ['Over twice the traffic capacity', 'Faster cars', 'Trees soak up a little pollution'],
+    desc: 'Four lanes split by a tree-lined median, with built-in underground power cables.',
+    good: ['Over twice the traffic capacity', 'Faster cars', 'Carries low-voltage electricity'],
     bad: ['Costs more to build and run'],
   },
   {
@@ -76,8 +83,8 @@ export const ITEMS: Item[] = [
     unit: 'tile',
     kind: 'road',
     road: 'gravel',
-    desc: 'Rough country lane for low-traffic edges of town.',
-    good: ['Very cheap', 'Nearly free upkeep'],
+    desc: 'Rough country lane for low-traffic edges of town, with a built-in power cable.',
+    good: ['Very cheap', 'Nearly free upkeep', 'Carries low-voltage electricity'],
     bad: ['Slow', 'Jams almost immediately'],
   },
   {
@@ -88,7 +95,7 @@ export const ITEMS: Item[] = [
     unit: 'tile',
     kind: 'res',
     dens: 'low',
-    desc: 'Detached houses and townhouses with gardens.',
+    desc: 'Mostly compact detached houses and townhouses, with a 0.01% chance of a mansion.',
     good: ['Quiet, little traffic', 'Low crime'],
     bad: ['Few residents per tile'],
   },
@@ -112,7 +119,7 @@ export const ITEMS: Item[] = [
     unit: 'tile',
     kind: 'com',
     dens: 'low',
-    desc: 'Corner shops, cafés and small offices.',
+    desc: 'Mostly compact corner shops and cafés, with an occasional larger store.',
     good: ['Cheap jobs close to homes'],
     bad: ['Few jobs per tile'],
   },
@@ -195,6 +202,78 @@ export const ITEMS: Item[] = [
     desc: 'A tall three-blade turbine.',
     good: ['Zero pollution', 'Cheapest power'],
     bad: ['Small output (450)'],
+  },
+  {
+    id: 'pylon',
+    name: 'Power pylon',
+    group: 'power',
+    cost: 250,
+    unit: 'each',
+    kind: 'pylon',
+    desc: 'Connects power stations to overhead lines and carries electricity between pylons up to 8 tiles away.',
+    good: ['Carries power between roads, pylons and transmission lines'],
+    bad: ['Must connect to a powered road, power station, line or another pylon'],
+  },
+  {
+    id: 'substation',
+    name: 'Electrical substation',
+    group: 'power',
+    cost: 6500,
+    upkeep: 100,
+    kind: 'substation',
+    desc: 'A transformer hub for the power grid. Connect high-voltage transmission lines to the substation, then run distribution lines out toward neighborhoods.',
+    good: ['Connects transmission to distribution', 'Needs a connected road'],
+    bad: ['Must be linked to a powered line or road'],
+  },
+  {
+    id: 'cable',
+    name: 'Underground cable',
+    group: 'power',
+    cost: 15,
+    unit: 'tile',
+    desc: 'Low-voltage power cable. Drag a path to connect buildings and roads off the road network.',
+    good: ['Runs underground', 'Can pass beneath buildings and roads'],
+    bad: ['Must form an unbroken path to a powered network'],
+  },
+  {
+    id: 'overhead_transmission',
+    name: 'Transmission lines',
+    group: 'power',
+    cost: 90,
+    unit: 'tile',
+    desc: 'High-voltage overhead lines on tall towers, carrying power from plants and pylons to substations.',
+    good: ['Longest reach between supports', 'Three-phase conductors'],
+    bad: ['Expensive', 'Must connect to a powered network'],
+  },
+  {
+    id: 'overhead_distribution',
+    name: 'Distribution lines',
+    group: 'power',
+    cost: 45,
+    unit: 'tile',
+    desc: 'Medium-voltage overhead lines on crossarm poles, carrying power from substations and pylons around town.',
+    good: ['Connects roads and neighborhoods', 'Visible poles and conductors'],
+    bad: ['Must connect to a powered network'],
+  },
+  {
+    id: 'overhead_service',
+    name: 'Service lines / mains',
+    group: 'power',
+    cost: 25,
+    unit: 'tile',
+    desc: 'Low-voltage service mains on short posts, for the final connection to buildings.',
+    good: ['Affordable local connections', 'Can pass above buildings'],
+    bad: ['Shorter spans', 'Must connect to a powered network'],
+  },
+  {
+    id: 'overhead_swer',
+    name: 'SWER (Single Wire Earth Return)',
+    group: 'power',
+    cost: 30,
+    unit: 'tile',
+    desc: 'Single Wire Earth Return rural line, with one conductor and earth-return markers.',
+    good: ['Economical rural electrification', 'Single conductor'],
+    bad: ['Must connect to a powered network'],
   },
   {
     id: 'pump',

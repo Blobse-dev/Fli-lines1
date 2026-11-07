@@ -5,9 +5,10 @@ export const N = 56 // map is N × N tiles
 import { ITEM } from './catalog'
 import type { ItemId } from './catalog'
 
-export type Service = 'power' | 'solar' | 'wind' | 'pump' | 'fire' | 'police' | 'health' | 'school'
-export type Kind = 'none' | 'road' | 'highway' | 'res' | 'com' | 'ind' | 'park' | Service
+export type Service = 'power' | 'solar' | 'wind' | 'substation' | 'pump' | 'fire' | 'police' | 'health' | 'school'
+export type Kind = 'none' | 'road' | 'highway' | 'res' | 'com' | 'ind' | 'park' | 'pylon' | Service
 export type RoadType = 'street' | 'avenue' | 'gravel'
+export type OverheadLineType = 'transmission' | 'distribution' | 'service' | 'swer'
 export type Tool = 'pan' | 'inspect' | ItemId
 export type BuildTool = ItemId
 export type Problem =
@@ -49,8 +50,14 @@ export interface Tile {
   problem: Problem | null
   dens: 'low' | 'high'
   road: RoadType
+  lotId: number | null
+  lotW: number
+  lotH: number
   pipe: boolean
   pipeOn: boolean // pipe linked to a working pump
+  undergroundCable: boolean
+  overheadCable: boolean
+  overheadType: OverheadLineType | null
   eduCov: boolean
 }
 
@@ -121,6 +128,7 @@ export const SERVICE_INFO: Record<
 > = {
   power: { name: 'Power plant', cost: 9000, upkeep: 420, radius: 15, capacity: 2600 },
   pump: { name: 'Water pump', cost: 4500, upkeep: 220, radius: 14, capacity: 2600 },
+  substation: { name: 'Electrical substation', cost: 6500, upkeep: 100, radius: 0 },
   fire: { name: 'Fire station', cost: 5000, upkeep: 260, radius: 10 },
   police: { name: 'Police station', cost: 5000, upkeep: 260, radius: 10 },
   health: { name: 'Clinic', cost: 6500, upkeep: 300, radius: 12 },
@@ -134,6 +142,20 @@ export const SERVICES = Object.keys(SERVICE_INFO) as Service[]
 
 export const COST = (t: BuildTool) => ITEM[t].cost
 export const BRIDGE_COST = 350
+const overheadLineType = (tool: BuildTool): OverheadLineType | null => {
+  switch (tool) {
+    case 'overhead_transmission':
+      return 'transmission'
+    case 'overhead_distribution':
+      return 'distribution'
+    case 'overhead_service':
+      return 'service'
+    case 'overhead_swer':
+      return 'swer'
+    default:
+      return null
+  }
+}
 
 export const HW_ROW = 13
 export const HW_COL = 41
@@ -351,6 +373,14 @@ export class City {
     city.milestone = snapshot.milestone
     city.warned = snapshot.warned
     city.rand = mulberry32(snapshot.randomState)
+    for (const tile of city.tiles) {
+      tile.lotId ??= null
+      tile.lotW ??= 0
+      tile.lotH ??= 0
+      tile.undergroundCable ??= false
+      tile.overheadCable ??= false
+      tile.overheadType ??= tile.overheadCable ? 'distribution' : null
+    }
     return city
   }
 
@@ -382,8 +412,14 @@ export class City {
       problem: null,
       dens: 'low',
       road: 'street',
+      lotId: null,
+      lotW: 0,
+      lotH: 0,
       pipe: false,
       pipeOn: false,
+      undergroundCable: false,
+      overheadCable: false,
+      overheadType: null,
       eduCov: false,
     }
   }
@@ -435,6 +471,160 @@ export class City {
     return inside(x, y) ? this.tiles[idx(x, y)] : undefined
   }
 
+  private lotArea(t: Tile) {
+    return t.lotW > 0 && t.lotH > 0 ? t.lotW * t.lotH : 1
+  }
+
+  private touchesRoad(x: number, y: number, w: number, h: number) {
+    for (let dx = 0; dx < w; dx++) {
+      const north = this.tile(x + dx, y - 1)
+      const south = this.tile(x + dx, y + h)
+      if (north?.kind === 'road' && north.connected || south?.kind === 'road' && south.connected) return true
+    }
+    for (let dy = 0; dy < h; dy++) {
+      const west = this.tile(x - 1, y + dy)
+      const east = this.tile(x + w, y + dy)
+      if (west?.kind === 'road' && west.connected || east?.kind === 'road' && east.connected) return true
+    }
+    return false
+  }
+
+  private findZoneLot(start: number, kind: Kind, dens: Tile['dens']) {
+    const sx = start % N
+    const sy = (start / N) | 0
+    const fits = (x: number, y: number, w: number, h: number) => {
+      if (x < 0 || y < 0 || x + w > N || y + h > N || !this.touchesRoad(x, y, w, h)) return false
+      for (let dy = 0; dy < h; dy++) {
+        for (let dx = 0; dx < w; dx++) {
+          const tile = this.tiles[idx(x + dx, y + dy)]
+          if (tile.kind !== kind || tile.dens !== dens || tile.lvl !== 0 || tile.ruin || tile.lotId != null || !tile.access)
+            return false
+        }
+      }
+      return true
+    }
+    if (kind === 'res') {
+      const mansion = this.rand() < 0.0001
+      const dimensions: [number, number] = mansion
+        ? this.rand() < 0.5 ? [2, 2] : [2, 3]
+        : this.rand() < 0.5 ? [1, 1] : this.rand() < 0.5 ? [1, 2] : [2, 1]
+      const [w, h] = dimensions
+      for (let attempt = 0; attempt < 24; attempt++) {
+        const x = sx - Math.floor(this.rand() * w)
+        const y = sy - Math.floor(this.rand() * h)
+        if (fits(x, y, w, h)) return { x, y, w, h }
+      }
+      if (mansion) {
+        for (const [smallW, smallH] of [[1, 2], [2, 1], [1, 1]] as const) {
+          for (let attempt = 0; attempt < 8; attempt++) {
+            const x = sx - Math.floor(this.rand() * smallW)
+            const y = sy - Math.floor(this.rand() * smallH)
+            if (fits(x, y, smallW, smallH)) return { x, y, w: smallW, h: smallH }
+          }
+        }
+      } else if (w !== 1 || h !== 1) {
+        if (fits(sx, sy, 1, 1)) return { x: sx, y: sy, w: 1, h: 1 }
+      }
+      return null
+    }
+    if (kind === 'com' && dens === 'low') {
+      const bigShop = this.rand() < 0.05
+      const dimensions: [number, number] = bigShop
+        ? this.rand() < 0.5 ? [2, 2] : [2, 3]
+        : this.rand() < 0.55 ? [1, 1] : this.rand() < 0.5 ? [1, 2] : [2, 1]
+      const [w, h] = dimensions
+      for (let attempt = 0; attempt < 24; attempt++) {
+        const x = sx - Math.floor(this.rand() * w)
+        const y = sy - Math.floor(this.rand() * h)
+        if (fits(x, y, w, h)) return { x, y, w, h }
+      }
+      const fallbacks = bigShop ? [[1, 1], [1, 2], [2, 1]] as const : [[1, 1]] as const
+      for (const [smallW, smallH] of fallbacks) {
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const x = sx - Math.floor(this.rand() * smallW)
+          const y = sy - Math.floor(this.rand() * smallH)
+          if (fits(x, y, smallW, smallH)) return { x, y, w: smallW, h: smallH }
+        }
+      }
+      return null
+    }
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const w = 2 + Math.floor(this.rand() * 5)
+      const h = 2 + Math.floor(this.rand() * 5)
+      const x = sx - Math.floor(this.rand() * w)
+      const y = sy - Math.floor(this.rand() * h)
+      if (fits(x, y, w, h)) return { x, y, w, h }
+    }
+    for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+      const x = sx - dx
+      const y = sy - dy
+      if (fits(x, y, 2, 2)) return { x, y, w: 2, h: 2 }
+    }
+    return null
+  }
+
+  /** Tiles within six cells of a standard road, excluding roads, highways, and blocked lots. */
+  zoningTiles(connectedOnly = false) {
+    const distance = new Uint8Array(this.tiles.length).fill(255)
+    const reachable = new Uint8Array(this.tiles.length)
+    const queue: number[] = []
+    for (let i = 0; i < this.tiles.length; i++) {
+      const t = this.tiles[i]
+      if (t.kind === 'road' && (!connectedOnly || t.connected)) {
+        distance[i] = 0
+        queue.push(i)
+      }
+    }
+    for (let head = 0; head < queue.length; head++) {
+      const i = queue[head]
+      const nextDistance = distance[i] + 1
+      if (nextDistance > 6) continue
+      const x = i % N
+      const y = (i / N) | 0
+      for (const [dx, dy] of DIRS) {
+        const nx = x + dx
+        const ny = y + dy
+        const next = this.tile(nx, ny)
+        if (!next || next.water || (next.kind !== 'none' && !isZone(next.kind))) continue
+        const ni = idx(nx, ny)
+        if (distance[ni] <= nextDistance) continue
+        distance[ni] = nextDistance
+        reachable[ni] = 1
+        queue.push(ni)
+      }
+    }
+    return reachable
+  }
+
+  /** All zoning tiles in the same contiguous paintable area as the start. */
+  zoneFill(start: [number, number]) {
+    const [sx, sy] = start
+    if (!inside(sx, sy)) return []
+    const reachable = this.zoningTiles()
+    const startIndex = idx(sx, sy)
+    if (!reachable[startIndex]) return []
+    const visited = new Uint8Array(this.tiles.length)
+    const queue = [startIndex]
+    visited[startIndex] = 1
+    const cells: [number, number][] = []
+    for (let head = 0; head < queue.length; head++) {
+      const i = queue[head]
+      const x = i % N
+      const y = (i / N) | 0
+      cells.push([x, y])
+      for (const [dx, dy] of DIRS) {
+        const nx = x + dx
+        const ny = y + dy
+        if (!inside(nx, ny)) continue
+        const ni = idx(nx, ny)
+        if (!reachable[ni] || visited[ni]) continue
+        visited[ni] = 1
+        queue.push(ni)
+      }
+    }
+    return cells
+  }
+
   private emit(tone: CityEvent['tone'], msg: string, at?: [number, number]) {
     this.events.push({ tone, msg, at })
     if (this.events.length > 40) this.events.shift()
@@ -448,10 +638,27 @@ export class City {
   // ---------- Player actions ----------
 
   /** Why a single tile can't take this tool, or null when it can. */
-  private reject(tool: BuildTool, x: number, y: number): string | null {
+  private reject(tool: BuildTool, x: number, y: number, zoneReach?: Uint8Array): string | null {
     const t = this.tile(x, y)
     if (!t) return 'Off the map'
+    const overheadType = overheadLineType(tool)
+    if (
+      t.lotId != null &&
+      tool !== 'bulldoze' &&
+      tool !== 'pipe' &&
+      tool !== 'cable' &&
+      overheadType === null
+    )
+      return 'A building occupies this lot'
     const item = ITEM[tool]
+    if (tool === 'cable') {
+      if (t.undergroundCable) return 'Already has an underground cable'
+      return null
+    }
+    if (overheadType) {
+      if (t.overheadCable) return 'Already has an overhead line'
+      return null
+    }
     if (tool === 'pipe') {
       if (t.water) return 'Pipes can’t cross the river'
       if (t.pipe) return 'Already piped'
@@ -466,9 +673,11 @@ export class City {
     }
     if (tool === 'bulldoze') {
       if (t.kind === 'highway') return 'The highway can’t be removed'
-      if (t.kind === 'none' && t.trees === 0 && !t.pipe) return 'Nothing to clear'
+      if (t.kind === 'none' && t.trees === 0 && !t.pipe && !t.undergroundCable && !t.overheadCable)
+        return 'Nothing to clear'
       return null
     }
+    if (item.kind && isZone(item.kind) && !zoneReach?.[idx(x, y)]) return 'Outside road zoning area'
     if (t.water) return 'Can’t build on water'
     if (item.kind && (item.kind === 'park' || isService(item.kind))) {
       if (t.kind !== 'none') return 'Clear the land first'
@@ -486,8 +695,27 @@ export class City {
     let cost = 0
     let reason: string | null = null
     const valid: [number, number][] = []
+    const item = ITEM[tool]
+    const zoneReach = item.kind && isZone(item.kind) ? this.zoningTiles() : undefined
+    const expanded: [number, number][] = []
+    const seen = new Set<number>()
     for (const [x, y] of cells) {
-      const why = this.reject(tool, x, y)
+      const tile = this.tile(x, y)
+      if (tool === 'bulldoze' && tile?.lotId != null) {
+        const lotId = tile.lotId
+        for (let i = 0; i < this.tiles.length; i++) {
+          if (this.tiles[i].lotId === lotId && !seen.has(i)) {
+            seen.add(i)
+            expanded.push([i % N, (i / N) | 0])
+          }
+        }
+      } else if (!inside(x, y) || !seen.has(idx(x, y))) {
+        if (inside(x, y)) seen.add(idx(x, y))
+        expanded.push([x, y])
+      }
+    }
+    for (const [x, y] of expanded) {
+      const why = this.reject(tool, x, y, zoneReach)
       if (why) {
         reason ??= why
         continue
@@ -514,6 +742,16 @@ export class City {
         t.pipe = true
         continue
       }
+      if (tool === 'cable') {
+        t.undergroundCable = true
+        continue
+      }
+      const overheadType = overheadLineType(tool)
+      if (overheadType) {
+        t.overheadCable = true
+        t.overheadType = overheadType
+        continue
+      }
       t.lvl = 0
       t.ruin = false
       t.abandoned = false
@@ -524,8 +762,14 @@ export class City {
       if (tool === 'bulldoze') {
         t.kind = 'none'
         t.trees = 0
+        t.lotId = null
+        t.lotW = 0
+        t.lotH = 0
         t.pipe = false
         t.pipeOn = false
+        t.undergroundCable = false
+        t.overheadCable = false
+        t.overheadType = null
       } else if (item.kind === 'road') {
         t.kind = 'road'
         t.road = item.road ?? 'street'
@@ -577,15 +821,30 @@ export class City {
         }
       }
     }
+    const zoneAccess = this.zoningTiles(true)
+    for (let i = 0; i < this.tiles.length; i++) {
+      const t = this.tiles[i]
+      if (t.lotId !== i || t.lvl === 0 || t.ruin || this.touchesRoad(i % N, (i / N) | 0, t.lotW, t.lotH))
+        continue
+      for (const tile of this.tiles) {
+        if (tile.lotId === i) {
+          tile.lotId = null
+          tile.lotW = 0
+          tile.lotH = 0
+          tile.lvl = 0
+        }
+      }
+    }
     for (let y = 0; y < N; y++) {
       for (let x = 0; x < N; x++) {
         const t = this.tiles[idx(x, y)]
-        t.access =
-          (isZone(t.kind) || isService(t.kind)) &&
-          DIRS.some(([dx, dy]) => {
-            const n = this.tile(x + dx, y + dy)
-            return !!n && n.kind === 'road' && n.connected
-          })
+        t.access = isZone(t.kind)
+          ? zoneAccess[idx(x, y)] === 1
+          : isService(t.kind) &&
+            DIRS.some(([dx, dy]) => {
+              const n = this.tile(x + dx, y + dy)
+              return !!n && n.kind === 'road' && n.connected
+            })
         if (isZone(t.kind) && !t.access && t.lvl > 0) t.lvl = 0 // cut off: buildings empty out
       }
     }
@@ -607,7 +866,7 @@ export class City {
             if (!n) continue
             const d = Math.abs(dx) + Math.abs(dy)
             if (n.kind === 'park' && d <= 4) parks++
-            if ((n.kind === 'com' || n.kind === 'res') && n.lvl > 0 && !n.abandoned) dense += n.lvl
+            if ((n.kind === 'com' || n.kind === 'res') && n.lvl > 0 && !n.abandoned) dense += n.lvl * this.lotArea(n)
             if ((n.abandoned || n.ruin) && d <= 2) blight++
             if (n.water && d <= 2) water = true
             if (n.trees > 0 && n.kind === 'none' && d <= 2) v += 0.008
@@ -629,9 +888,9 @@ export class City {
   private capOf(t: Tile) {
     if (t.lvl === 0 || t.abandoned || t.ruin || t.burning > 0) return 0
     const g = t.grow
-    if (t.kind === 'res') return CAP_RES[t.lvl] * g
-    if (t.kind === 'com') return CAP_COM[t.lvl] * g
-    if (t.kind === 'ind') return CAP_IND[t.lvl] * g
+    if (t.kind === 'res') return CAP_RES[t.lvl] * g * this.lotArea(t)
+    if (t.kind === 'com') return CAP_COM[t.lvl] * g * this.lotArea(t)
+    if (t.kind === 'ind') return CAP_IND[t.lvl] * g * this.lotArea(t)
     return 0
   }
 
@@ -677,7 +936,7 @@ export class City {
       const y = (i / N) | 0
       if (isPowerKind(t.kind)) plants.push([x, y, SERVICE_INFO[t.kind].capacity ?? 0])
       else if (t.kind === 'pump') pumps.push([x, y])
-      else {
+      else if (t.kind !== 'substation') {
         const R = SERVICE_INFO[t.kind].radius
         for (let dy = -R; dy <= R; dy++)
           for (let dx = -R; dx <= R; dx++) {
@@ -689,6 +948,71 @@ export class City {
             else if (t.kind === 'school') n.eduCov = true
             else n.healthCov = true
           }
+      }
+    }
+
+    // Power follows the full connected network; pylons span gaps of up to 8 tiles.
+    const wireDistance = new Uint16Array(T.length).fill(0xffff)
+    const wireQueue: number[] = []
+    const isWireNode = (tile: Tile | undefined) =>
+      !!tile &&
+      (tile.kind === 'pylon' ||
+        (tile.kind === 'substation' && tile.access && tile.grow >= 1) ||
+        tile.undergroundCable ||
+        tile.overheadCable ||
+        (tile.kind === 'road' && tile.connected))
+    const addWire = (i: number, distance: number) => {
+      if (wireDistance[i] <= distance) return
+      wireDistance[i] = distance
+      wireQueue.push(i)
+    }
+    for (const [x, y] of plants) {
+      for (const [dx, dy] of DIRS) {
+        if (isWireNode(this.tile(x + dx, y + dy))) addWire(idx(x + dx, y + dy), 0)
+      }
+    }
+    for (let head = 0; head < wireQueue.length; head++) {
+      const i = wireQueue[head]
+      const distance = wireDistance[i] + 1
+      const x = i % N
+      const y = (i / N) | 0
+      const isPylon = T[i].kind === 'pylon'
+      if (isPylon) {
+        for (let dy = -8; dy <= 8; dy++) {
+          for (let dx = -8; dx <= 8; dx++) {
+            if (dx * dx + dy * dy > 64) continue
+            const next = this.tile(x + dx, y + dy)
+            if (isWireNode(next)) addWire(idx(x + dx, y + dy), distance)
+          }
+        }
+      } else {
+        for (const [dx, dy] of DIRS) {
+          if (isWireNode(this.tile(x + dx, y + dy))) addWire(idx(x + dx, y + dy), distance)
+        }
+        for (let dy = -8; dy <= 8; dy++) {
+          for (let dx = -8; dx <= 8; dx++) {
+            if (dx * dx + dy * dy > 64) continue
+            const next = this.tile(x + dx, y + dy)
+            if (next?.kind === 'pylon') addWire(idx(x + dx, y + dy), distance)
+          }
+        }
+      }
+    }
+    const powerReach = new Float32Array(T.length).fill(Infinity)
+    for (let i = 0; i < T.length; i++) {
+      const distance = wireDistance[i]
+      if (distance === 0xffff) continue
+      const x = i % N
+      const y = (i / N) | 0
+      T[i].power = true
+      for (let dy = -6; dy <= 6; dy++) {
+        for (let dx = -6; dx <= 6; dx++) {
+          if (Math.abs(dx) + Math.abs(dy) > 6) continue
+          const tile = this.tile(x + dx, y + dy)
+          if (!tile) continue
+          const j = idx(x + dx, y + dy)
+          powerReach[j] = Math.min(powerReach[j], distance)
+        }
       }
     }
 
@@ -732,8 +1056,11 @@ export class City {
       let demand = 0
       for (let i = 0; i < T.length; i++) {
         const t = T[i]
+        if (t.kind === 'substation') continue
         if (!(isZone(t.kind) && t.lvl > 0 && !t.ruin) && !(isService(t.kind) && !self(t.kind))) continue
-        const load = isService(t.kind) ? 20 : Math.max(6, (t.kind === 'res' ? CAP_RES : t.kind === 'com' ? CAP_COM : CAP_IND)[t.lvl])
+        const load = isService(t.kind)
+          ? 20
+          : Math.max(6, (t.kind === 'res' ? CAP_RES : t.kind === 'com' ? CAP_COM : CAP_IND)[t.lvl]) * this.lotArea(t)
         demand += load
         const d = reach(i)
         if (d < Infinity) want.push([d, i, load])
@@ -747,16 +1074,9 @@ export class City {
       }
       return { cap, demand }
     }
-    const R2 = 15 * 15
     const p = supply(
       plants.reduce((a, b) => a + b[2], 0),
-      (i) => {
-        const x = i % N
-        const y = (i / N) | 0
-        let best = Infinity
-        for (const [sx, sy] of plants) best = Math.min(best, (sx - x) ** 2 + (sy - y) ** 2)
-        return best <= R2 ? best : Infinity
-      },
+      (i) => powerReach[i],
       (t) => (t.power = true),
       isPowerKind,
     )
@@ -787,7 +1107,7 @@ export class City {
       const x = i % N
       const y = (i / N) | 0
       if (t.kind === 'ind' && t.lvl > 0 && !t.abandoned && !t.ruin)
-        spread(x, y, t.dens === 'high' ? 5 : 3, (t.dens === 'high' ? 0.16 : 0.05) * t.lvl)
+        spread(x, y, t.dens === 'high' ? 5 : 3, (t.dens === 'high' ? 0.16 : 0.05) * t.lvl * this.lotArea(t))
       else if (t.kind === 'power') spread(x, y, 7, 0.55)
       else if (t.kind === 'road' && t.traffic > 2.5 * ROAD_CAP[t.road]) spread(x, y, 2, 0.04 * t.traffic)
       else if (t.kind === 'road' && t.road === 'avenue') spread(x, y, 1, -0.03)
@@ -1018,7 +1338,7 @@ export class City {
     for (let n = 0; n < 160; n++) {
       const i = Math.floor(this.rand() * this.tiles.length)
       const t = this.tiles[i]
-      if (!isZone(t.kind) || !t.access || t.ruin || t.burning > 0) continue
+      if (!isZone(t.kind) || !t.access || t.ruin || t.burning > 0 || (t.lotId != null && t.lotId !== i)) continue
       if (t.lvl > 0 && !t.abandoned && t.grow >= 1) {
         const risk = 0.00016 * (t.kind === 'ind' ? 2.2 : 1) * (t.fireCov ? 0.3 : 1) * (1 + t.lvl * 0.3)
         if (this.rand() < risk) {
@@ -1031,10 +1351,25 @@ export class City {
       const target = this.targetLevel(t)
       if (t.lvl === 0) {
         if (dem > -0.1 && this.rand() < 0.25 + dem * 0.5) {
-          t.lvl = 1
-          t.grow = 0
-          t.seed = this.rand()
-          t.unhappy = 0
+          const lot = this.findZoneLot(i, t.kind, t.dens)
+          if (!lot) continue
+          const anchor = idx(lot.x, lot.y)
+          for (let dy = 0; dy < lot.h; dy++) {
+            for (let dx = 0; dx < lot.w; dx++) {
+              const cell = this.tiles[idx(lot.x + dx, lot.y + dy)]
+              cell.lotId = anchor
+              cell.lotW = 0
+              cell.lotH = 0
+              cell.lvl = 0
+            }
+          }
+          const building = this.tiles[anchor]
+          building.lotW = lot.w
+          building.lotH = lot.h
+          building.lvl = 1
+          building.grow = 0
+          building.seed = this.rand()
+          building.unhappy = 0
         }
       } else if (t.lvl < target && t.grow >= 1) {
         if (dem > 0.05 && this.rand() < 0.04 + dem * 0.12) {
@@ -1401,7 +1736,7 @@ export function dragCells(tool: Tool, a: [number, number], b: [number, number]):
   const k = tool === 'pan' || tool === 'inspect' ? undefined : ITEM[tool].kind
   if (k && (isService(k) || k === 'park')) return inside(b[0], b[1]) ? [b] : []
   const out: [number, number][] = []
-  if (k === 'road' || tool === 'pipe') {
+  if (k === 'road' || tool === 'pipe' || tool === 'cable' || tool.startsWith('overhead_')) {
     // L-shaped path: along the longer axis first.
     const [ax, ay] = a
     const [bx, by] = b
@@ -1433,4 +1768,30 @@ export function dragCells(tool: Tool, a: [number, number], b: [number, number]):
   const y1 = Math.min(N - 1, Math.max(a[1], b[1]))
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) out.push([x, y])
   return out
+}
+
+/** Tile-by-tile brush path between two points. */
+export function brushCells(a: [number, number], b: [number, number]): [number, number][] {
+  let [x, y] = a
+  const [bx, by] = b
+  const dx = Math.abs(bx - x)
+  const dy = Math.abs(by - y)
+  const sx = x < bx ? 1 : -1
+  const sy = y < by ? 1 : -1
+  let error = dx - dy
+  const cells: [number, number][] = []
+  while (true) {
+    if (inside(x, y)) cells.push([x, y])
+    if (x === bx && y === by) break
+    const twiceError = error * 2
+    if (twiceError > -dy) {
+      error -= dy
+      x += sx
+    }
+    if (twiceError < dx) {
+      error += dx
+      y += sy
+    }
+  }
+  return cells
 }
